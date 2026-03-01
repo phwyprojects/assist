@@ -102,9 +102,9 @@ app.post("/inbound", async (req, res) => {
     const wantsShows = /announced|confirmed shows|show list|tour dates|seated|upcoming shows|what shows|which shows|nina.*shows|shows.*nina/i.test(cleanedBody);
 
     // Spotify track lookup
-    const spotifyMatch = cleanedBody.match(/(?:isrc|track length|duration|spotify).*?["‘’“”]?([^"\n]{3,60})["‘’“”]?/i)
-      || cleanedBody.match(/(?:look up|find|get|search).*?(?:track|song)[^\w]+([\w][^
-]{3,60})/i);
+    const wantsSpotify = /isrc|spotify|track length/i.test(cleanedBody);
+    const spotifyQueryMatch = cleanedBody.match(/for\s+(?:ninajirachi[^\w]{0,5})?([A-Za-z][^?.!\n]{2,50})/i);
+    const spotifyQuery = spotifyQueryMatch ? spotifyQueryMatch[1].trim() : null;
 
     const [memories, sheetData, contextData, seatedShows, spotifyData, attachments, ...urlContents] = await Promise.all([
       getMemories(),
