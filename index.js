@@ -13,6 +13,9 @@ const resend = new Resend(process.env.RESEND_API_KEY);
 const YOUR_EMAIL = process.env.YOUR_EMAIL;
 const ASSISTANT_EMAIL = process.env.ASSISTANT_EMAIL;
 
+// Google Sheet ID extracted from the shared URL
+const SHEET_ID = "123efb9NVIO8D0C-gBSpcrubqKqSMrB8vm2OYsLNh7iA";
+
 const BASE_SYSTEM_PROMPT = `You are MP, a smart and efficient assistant for Matt, an artist manager. Matt manages an artist named Ninajirachi.
 
 Matt will email you directly to get things done — asking questions, forwarding emails from promoters or press, thinking through decisions, drafting communications, managing the tour schedule, keeping track of tasks.
@@ -56,58 +59,50 @@ app.post("/inbound", async (req, res) => {
     const cleanedBody = cleanQuotedText(body);
     if (!cleanedBody.trim()) return;
 
-    // Check if this is a memory command
+    // Memory commands
     const memoryMatch = cleanedBody.match(/^remember[:\s]+(.+)/is);
     const forgetMatch = cleanedBody.match(/^forget[:\s]+(.+)/is);
     const showMemoryMatch = cleanedBody.match(/^(show memory|what do you remember|memory)/i);
 
     if (memoryMatch) {
       await addMemory(memoryMatch[1].trim());
-      await resend.emails.send({
-        from: `MP <${ASSISTANT_EMAIL}>`,
-        to: senderEmail,
-        subject: subject?.startsWith("Re:") ? subject : `Re: ${subject}`,
-        text: `Got it, I've saved that to permanent memory:\n\n"${memoryMatch[1].trim()}"`,
-        html: toHtml(`Got it, I've saved that to permanent memory:\n\n"${memoryMatch[1].trim()}"`),
-      });
+      await sendReply(senderEmail, subject, `Got it, saved to permanent memory:\n\n"${memoryMatch[1].trim()}"`);
       return;
     }
 
     if (forgetMatch) {
       const removed = await removeMemory(forgetMatch[1].trim());
-      await resend.emails.send({
-        from: `MP <${ASSISTANT_EMAIL}>`,
-        to: senderEmail,
-        subject: subject?.startsWith("Re:") ? subject : `Re: ${subject}`,
-        text: removed ? `Removed from memory: "${forgetMatch[1].trim()}"` : `Couldn't find that in memory.`,
-        html: toHtml(removed ? `Removed from memory: "${forgetMatch[1].trim()}"` : `Couldn't find that in memory.`),
-      });
+      await sendReply(senderEmail, subject, removed ? `Removed from memory: "${forgetMatch[1].trim()}"` : `Couldn't find that in memory.`);
       return;
     }
 
     if (showMemoryMatch) {
       const memories = await getMemories();
       const memText = memories.length
-        ? `Here's what I have in permanent memory:\n\n${memories.map((m, i) => `${i + 1}. ${m}`).join("\n")}`
+        ? `Permanent memory:\n\n${memories.map((m, i) => `${i + 1}. ${m}`).join("\n")}`
         : `Nothing in permanent memory yet. Email "remember: [something]" to add things.`;
-      await resend.emails.send({
-        from: `MP <${ASSISTANT_EMAIL}>`,
-        to: senderEmail,
-        subject: subject?.startsWith("Re:") ? subject : `Re: ${subject}`,
-        text: memText,
-        html: toHtml(memText),
-      });
+      await sendReply(senderEmail, subject, memText);
       return;
     }
 
-    // Build system prompt with permanent memory injected
-    const memories = await getMemories();
-    const memoryContext = memories.length
-      ? `\n\nPermanent context (always remember this):\n${memories.map((m, i) => `- ${m}`).join("\n")}`
-      : "";
-    const systemPrompt = BASE_SYSTEM_PROMPT + memoryContext;
+    // Fetch schedule and memories in parallel
+    const [memories, scheduleData] = await Promise.all([
+      getMemories(),
+      fetchSchedule(),
+    ]);
 
-    // Load recent conversation history
+    // Build system prompt
+    const memoryContext = memories.length
+      ? `\n\nPermanent context (always remember this):\n${memories.map(m => `- ${m}`).join("\n")}`
+      : "";
+
+    const scheduleContext = scheduleData
+      ? `\n\nCurrent tour schedule (live from Google Sheet):\n${scheduleData}`
+      : "";
+
+    const systemPrompt = BASE_SYSTEM_PROMPT + memoryContext + scheduleContext;
+
+    // Load conversation history
     const raw = await redis.get(THREAD_KEY);
     const history = raw ? JSON.parse(raw) : [];
     history.push({ role: "user", content: cleanedBody });
@@ -124,19 +119,34 @@ app.post("/inbound", async (req, res) => {
     const trimmed = history.length > 40 ? history.slice(-40) : history;
     await redis.set(THREAD_KEY, JSON.stringify(trimmed));
 
-    await resend.emails.send({
-      from: `MP <${ASSISTANT_EMAIL}>`,
-      to: senderEmail,
-      subject: subject?.startsWith("Re:") ? subject : `Re: ${subject}`,
-      text: reply,
-      html: toHtml(reply),
-    });
-
+    await sendReply(senderEmail, subject, reply);
     console.log("Reply sent to:", senderEmail);
   } catch (err) {
     console.error("Error:", err);
   }
 });
+
+// Fetch Google Sheet as CSV and convert to readable text
+async function fetchSchedule() {
+  try {
+    const csvUrl = `https://docs.google.com/spreadsheets/d/${SHEET_ID}/export?format=csv`;
+    const response = await fetch(csvUrl);
+    if (!response.ok) {
+      console.error("Failed to fetch schedule:", response.status);
+      return null;
+    }
+    const csv = await response.text();
+    // Convert CSV to readable plain text table
+    const rows = csv.split("\n").map(row =>
+      row.split(",").map(cell => cell.replace(/^"|"$/g, "").trim())
+    ).filter(row => row.some(cell => cell));
+
+    return rows.map(row => row.join(" | ")).join("\n");
+  } catch (err) {
+    console.error("Schedule fetch error:", err);
+    return null;
+  }
+}
 
 // Memory functions
 async function getMemories() {
@@ -163,7 +173,16 @@ async function removeMemory(item) {
   return false;
 }
 
-// Fetch received email content
+async function sendReply(to, subject, text) {
+  await resend.emails.send({
+    from: `MP <${ASSISTANT_EMAIL}>`,
+    to,
+    subject: subject?.startsWith("Re:") ? subject : `Re: ${subject}`,
+    text,
+    html: toHtml(text),
+  });
+}
+
 async function fetchReceivedEmail(emailId) {
   const endpoints = [
     `https://api.resend.com/emails/receiving/${emailId}`,
@@ -181,7 +200,7 @@ async function fetchReceivedEmail(emailId) {
       console.log("Endpoint failed:", url, err.message);
     }
   }
-  console.error("Could not fetch email content for:", emailId);
+  console.error("Could not fetch email content");
   return null;
 }
 
