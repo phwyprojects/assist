@@ -82,7 +82,7 @@ app.post("/inbound", async (req, res) => {
     await redis.set(THREAD_KEY, JSON.stringify(trimmed));
 
     await resend.emails.send({
-      from: `Claude <${ASSISTANT_EMAIL}>`,
+      from: `MP <${ASSISTANT_EMAIL}>`,
       to: senderEmail,
       subject: subject?.startsWith("Re:") ? subject : `Re: ${subject}`,
       text: reply,
@@ -127,7 +127,7 @@ function toHtml(text) {
   return `<!DOCTYPE html><html><head><meta charset="utf-8"></head>
 <body style="margin:0;padding:32px;background:#fff;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;max-width:600px;">
   <pre style="white-space:pre-wrap;font-family:inherit;font-size:14px;line-height:1.7;color:#222;">${escaped}</pre>
-  <div style="margin-top:32px;padding-top:16px;border-top:1px solid #eee;font-size:11px;color:#bbb;">Claude · ${ASSISTANT_EMAIL}</div>
+  <div style="margin-top:32px;padding-top:16px;border-top:1px solid #eee;font-size:11px;color:#bbb;">MP · ${ASSISTANT_EMAIL}</div>
 </body></html>`;
 }
 
