@@ -85,11 +85,13 @@ app.post("/inbound", async (req, res) => {
       return;
     }
 
-    // Fetch memories and both sheets in parallel
-    const [memories, sheetData, contextData] = await Promise.all([
+    // Extract URLs from email and fetch content
+    const urls = extractUrls(cleanedBody);
+    const [memories, sheetData, contextData, ...urlContents] = await Promise.all([
       getMemories(),
       fetchAllSheetTabs(SHEET_ID),
       fetchAllSheetTabs(CONTEXT_SHEET_ID),
+      ...urls.map(url => fetchUrl(url)),
     ]);
 
     const memoryContext = memories.length
@@ -104,7 +106,11 @@ app.post("/inbound", async (req, res) => {
       ? `\n\nKey context and info:\n${contextData}`
       : "";
 
-    const systemPrompt = BASE_SYSTEM_PROMPT + memoryContext + sheetContext + contextSheetContext;
+    const urlContext = urlContents.filter(Boolean).length
+      ? `\n\nContent from links in your email:\n${urlContents.filter(Boolean).map((c, i) => `--- ${urls[i]} ---\n${c}`).join("\n\n")}`
+      : "";
+
+    const systemPrompt = BASE_SYSTEM_PROMPT + memoryContext + sheetContext + contextSheetContext + urlContext;
 
     const raw = await redis.get(THREAD_KEY);
     const history = raw ? JSON.parse(raw) : [];
@@ -257,3 +263,38 @@ app.listen(PORT, async () => {
     console.error("Redis connection failed:", err);
   }
 });
+
+// Extract URLs from text
+function extractUrls(text) {
+  const urlRegex = /https?:\/\/[^\s<>"{}|\\^`\[\]]+/g;
+  const matches = text.match(urlRegex) || [];
+  // Skip google sheets/docs (already handled separately), limit to 3 URLs
+  return matches
+    .filter(url => !url.includes("docs.google.com") && !url.includes("sheets.google.com"))
+    .slice(0, 3);
+}
+
+// Fetch a URL and return its text content
+async function fetchUrl(url) {
+  try {
+    console.log("Fetching URL:", url);
+    const response = await fetch(url, {
+      headers: { "User-Agent": "Mozilla/5.0 (compatible; MPAssistant/1.0)" },
+      signal: AbortSignal.timeout(8000),
+    });
+    if (!response.ok) return null;
+    const html = await response.text();
+    // Strip HTML tags and clean up whitespace
+    const text = html
+      .replace(/<script[^>]*>[\s\S]*?<\/script>/gi, "")
+      .replace(/<style[^>]*>[\s\S]*?<\/style>/gi, "")
+      .replace(/<[^>]+>/g, " ")
+      .replace(/\s+/g, " ")
+      .trim()
+      .slice(0, 3000); // Cap at 3000 chars per URL
+    return text;
+  } catch (err) {
+    console.log("URL fetch failed:", url, err.message);
+    return null;
+  }
+}
