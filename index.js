@@ -97,10 +97,11 @@ app.post("/inbound", async (req, res) => {
     // Extract URLs from email and fetch content
     const urls = extractUrls(cleanedBody);
     const attachmentMeta = event.data.attachments || [];
-    const [memories, sheetData, contextData, attachments, ...urlContents] = await Promise.all([
+    const [memories, sheetData, contextData, seatedShows, attachments, ...urlContents] = await Promise.all([
       getMemories(),
       fetchAllSheetTabs(SHEET_ID),
       fetchAllSheetTabs(CONTEXT_SHEET_ID),
+      fetchSeatedShows(),
       fetchAttachments(email_id, attachmentMeta),
       ...urls.map(url => fetchUrl(url)),
     ]);
@@ -113,11 +114,15 @@ app.post("/inbound", async (req, res) => {
       ? `\n\nTour schedule (Google Sheet):\n${sheetData}`
       : "";
 
+    const seatedContext = seatedShows
+      ? `\n\nUpcoming shows (live from Seated):\n${seatedShows}`
+      : "";
+
     const contextSheetContext = contextData
       ? `\n\nKey context and info:\n${contextData}`
       : "";
 
-    const systemPrompt = BASE_SYSTEM_PROMPT + memoryContext + sheetContext + contextSheetContext;
+    const systemPrompt = BASE_SYSTEM_PROMPT + memoryContext + sheetContext + seatedContext + contextSheetContext;
 
     const raw = await redis.get(THREAD_KEY);
     const history = raw ? JSON.parse(raw) : [];
@@ -384,4 +389,29 @@ async function fetchAttachments(emailId, attachmentMeta) {
   }
   
   return results;
+}
+
+// Fetch Ninajirachi shows from Seated API
+async function fetchSeatedShows() {
+  try {
+    const response = await fetch(
+      "https://cdn.seated.com/api/tour/22d23327-0a5a-4431-826d-3baa90fd57e0?include=tour-events",
+      { headers: { "Accept": "application/json" } }
+    );
+    if (!response.ok) return null;
+    const data = await response.json();
+
+    const events = data.included?.filter(i => i.type === "tour-events") || [];
+    if (!events.length) return null;
+
+    const lines = events.map(e => {
+      const a = e.attributes || {};
+      return `${a.starts_at_date || ""} | ${a.venue_name || ""} | ${a.city || ""}, ${a.country_code || ""} | ${a.ticket_status || ""}`;
+    });
+
+    return lines.join("\n");
+  } catch (err) {
+    console.error("Seated fetch error:", err);
+    return null;
+  }
 }
