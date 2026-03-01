@@ -350,13 +350,22 @@ async function fetchAttachments(emailId, attachmentMeta) {
       
       const data = await response.json();
       console.log("Attachment API response keys:", Object.keys(data));
-      console.log("Attachment content length:", data.content ? data.content.length : "null");
-      const base64Data = data.content || data.data || data.body;
-      
-      if (!base64Data) {
-        console.log("No base64 data found in attachment response:", JSON.stringify(data).slice(0, 200));
+
+      // Resend returns a download_url, not the content directly
+      if (!data.download_url) {
+        console.log("No download_url in attachment response");
         continue;
       }
+
+      const dlResponse = await fetch(data.download_url);
+      if (!dlResponse.ok) {
+        console.log("Attachment download failed:", dlResponse.status);
+        continue;
+      }
+
+      const buffer = await dlResponse.arrayBuffer();
+      const base64Data = Buffer.from(buffer).toString("base64");
+      console.log("Attachment downloaded, base64 length:", base64Data.length);
       
       const ct = att.content_type || "";
       
