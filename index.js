@@ -343,14 +343,20 @@ async function fetchAttachments(emailId, attachmentMeta) {
       });
       
       if (!response.ok) {
-        console.log("Attachment fetch failed:", response.status);
+        const errText = await response.text();
+        console.log("Attachment fetch failed:", response.status, errText);
         continue;
       }
       
       const data = await response.json();
-      const base64Data = data.content; // Resend returns base64 content
+      console.log("Attachment API response keys:", Object.keys(data));
+      console.log("Attachment content length:", data.content ? data.content.length : "null");
+      const base64Data = data.content || data.data || data.body;
       
-      if (!base64Data) continue;
+      if (!base64Data) {
+        console.log("No base64 data found in attachment response:", JSON.stringify(data).slice(0, 200));
+        continue;
+      }
       
       const ct = att.content_type || "";
       
