@@ -394,21 +394,38 @@ async function fetchAttachments(emailId, attachmentMeta) {
 // Fetch Ninajirachi shows from Seated API
 async function fetchSeatedShows() {
   try {
+    console.log("Fetching Seated shows...");
     const response = await fetch(
       "https://cdn.seated.com/api/tour/22d23327-0a5a-4431-826d-3baa90fd57e0?include=tour-events",
       { headers: { "Accept": "application/json" } }
     );
+    console.log("Seated response status:", response.status);
     if (!response.ok) return null;
     const data = await response.json();
+    console.log("Seated data keys:", Object.keys(data));
+    console.log("Seated included count:", data.included?.length || 0);
 
     const events = data.included?.filter(i => i.type === "tour-events") || [];
-    if (!events.length) return null;
+    if (!events.length) {
+      // Try alternate structure
+      const altEvents = data.data || [];
+      console.log("Alt events count:", altEvents.length);
+      if (altEvents.length) {
+        const lines = altEvents.map(e => {
+          const a = e.attributes || {};
+          return `${a.starts_at_date || a.date || ""} | ${a.venue_name || a.venue || ""} | ${a.city || ""}, ${a.country_code || a.country || ""} | ${a.ticket_status || ""}`;
+        });
+        return lines.join("\n");
+      }
+      return null;
+    }
 
     const lines = events.map(e => {
       const a = e.attributes || {};
       return `${a.starts_at_date || ""} | ${a.venue_name || ""} | ${a.city || ""}, ${a.country_code || ""} | ${a.ticket_status || ""}`;
     });
 
+    console.log("Seated shows found:", lines.length);
     return lines.join("\n");
   } catch (err) {
     console.error("Seated fetch error:", err);
