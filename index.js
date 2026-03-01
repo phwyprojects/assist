@@ -37,8 +37,21 @@ app.get("/", (req, res) => res.send("Running ✓"));
 app.post("/inbound", async (req, res) => {
   res.sendStatus(200);
   try {
-    const { from, subject, text, html, headers } = req.body;
-    const body = text || stripHtml(html) || "";
+    const event = req.body;
+
+    // Resend wraps the payload in event.type / event.data
+    if (event.type !== "email.received") return;
+
+    const { email_id, from, subject } = event.data;
+
+    // Fetch the actual email content from Resend API
+    const emailContent = await fetchEmailContent(email_id);
+    if (!emailContent) {
+      console.error("Could not fetch email content for:", email_id);
+      return;
+    }
+
+    const body = emailContent.text || stripHtml(emailContent.html) || "";
     if (!body.trim()) return;
 
     const senderEmail = parseEmail(from);
@@ -48,22 +61,20 @@ app.post("/inbound", async (req, res) => {
       return;
     }
 
-    const inReplyTo = headers?.["in-reply-to"] || req.body["in-reply-to"] || "";
-    const messageId = headers?.["message-id"] || req.body["message-id"] || `${Date.now()}`;
-    const cleanedBody = cleanQuotedText(body);
-
-    if (!cleanedBody.trim()) return;
+    const inReplyTo = emailContent.headers?.find(h => h.name?.toLowerCase() === "in-reply-to")?.value || "";
+    const messageId = emailContent.headers?.find(h => h.name?.toLowerCase() === "message-id")?.value || `${Date.now()}`;
 
     console.log(`Message from Matt | Subject: ${subject}`);
+
+    const cleanedBody = cleanQuotedText(body);
+    if (!cleanedBody.trim()) return;
 
     // Load conversation history
     const raw = await redis.get(THREAD_KEY);
     const history = raw ? JSON.parse(raw) : [];
 
-    // Add Matt's message
     history.push({ role: "user", content: cleanedBody });
 
-    // Call Claude with full history
     const response = await anthropic.messages.create({
       model: "claude-sonnet-4-20250514",
       max_tokens: 1500,
@@ -73,12 +84,10 @@ app.post("/inbound", async (req, res) => {
 
     const reply = response.content.map((b) => b.text || "").join("").trim();
 
-    // Save updated history (cap at 40 messages to stay within limits)
     history.push({ role: "assistant", content: reply });
     const trimmed = history.length > 40 ? history.slice(-40) : history;
     await redis.set(THREAD_KEY, JSON.stringify(trimmed));
 
-    // Send reply email
     const emailOpts = {
       from: `Claude <${ASSISTANT_EMAIL}>`,
       to: YOUR_EMAIL,
@@ -91,11 +100,30 @@ app.post("/inbound", async (req, res) => {
     }
 
     await resend.emails.send(emailOpts);
-    console.log("Reply sent");
+    console.log("Reply sent to Matt");
   } catch (err) {
     console.error("Error:", err);
   }
 });
+
+// Fetch full email content from Resend's receiving API
+async function fetchEmailContent(emailId) {
+  try {
+    const response = await fetch(`https://api.resend.com/emails/receiving/${emailId}`, {
+      headers: {
+        Authorization: `Bearer ${process.env.RESEND_API_KEY}`,
+      },
+    });
+    if (!response.ok) {
+      console.error("Resend API error:", response.status, await response.text());
+      return null;
+    }
+    return await response.json();
+  } catch (err) {
+    console.error("Failed to fetch email content:", err);
+    return null;
+  }
+}
 
 function toHtml(text) {
   const escaped = text.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
