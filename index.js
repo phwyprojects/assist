@@ -34,45 +34,31 @@ app.get("/", (req, res) => res.send("Running ✓"));
 
 app.post("/inbound", async (req, res) => {
   res.sendStatus(200);
-
-  // Log the full payload so we can see exactly what Resend sends
-  console.log("Webhook payload:", JSON.stringify(req.body, null, 2));
-
   try {
     const event = req.body;
-    if (event.type !== "email.received") {
-      console.log("Ignoring event type:", event.type);
-      return;
-    }
+    if (event.type !== "email.received") return;
 
-    const data = event.data || {};
-    const from = data.from || "";
-    const subject = data.subject || "";
+    const { email_id, from, subject } = event.data;
+    console.log(`Received email | From: ${from} | Subject: ${subject} | ID: ${email_id}`);
 
-    // Try all possible locations for email body
-    const body = data.text || data.plain_text || data.html_body || stripHtml(data.html) || "";
+    // Fetch the full email content using the receiving API
+    const emailContent = await fetchReceivedEmail(email_id);
+    if (!emailContent) return;
 
-    console.log("From:", from);
-    console.log("Subject:", subject);
-    console.log("Body length:", body.length);
-    console.log("Available data keys:", Object.keys(data));
+    console.log("Email content keys:", Object.keys(emailContent));
+
+    const body = emailContent.text || emailContent.plain_text || stripHtml(emailContent.html) || "";
+    console.log("Body length:", body.length, "| Body preview:", body.slice(0, 100));
 
     if (!body.trim()) {
-      console.log("No body found in payload, attempting API fetch...");
-      // Try fetching via Resend SDK
-      try {
-        const emailData = await resend.emails.get(data.email_id);
-        console.log("SDK fetch result:", JSON.stringify(emailData, null, 2));
-      } catch (e) {
-        console.log("SDK fetch failed:", e.message);
-      }
+      console.log("Empty body, skipping");
       return;
     }
 
     const senderEmail = parseEmail(from);
     const allowedEmails = (process.env.ALLOWED_EMAILS || YOUR_EMAIL).split(",").map(e => e.trim().toLowerCase());
     if (!allowedEmails.includes(senderEmail.toLowerCase())) {
-      console.log(`Ignoring email from unknown sender: ${senderEmail}`);
+      console.log(`Ignoring unknown sender: ${senderEmail}`);
       return;
     }
 
@@ -108,6 +94,33 @@ app.post("/inbound", async (req, res) => {
     console.error("Error:", err);
   }
 });
+
+// Fetch received email content from Resend's receiving API
+async function fetchReceivedEmail(emailId) {
+  // Try multiple possible endpoint formats
+  const endpoints = [
+    `https://api.resend.com/emails/receiving/${emailId}`,
+    `https://api.resend.com/receiving/emails/${emailId}`,
+    `https://api.resend.com/emails/${emailId}`,
+  ];
+
+  for (const url of endpoints) {
+    try {
+      console.log("Trying endpoint:", url);
+      const response = await fetch(url, {
+        headers: { Authorization: `Bearer ${process.env.RESEND_API_KEY}` },
+      });
+      const data = await response.json();
+      console.log(`Endpoint ${url} status:`, response.status, "| Keys:", Object.keys(data));
+      if (response.ok && (data.text || data.html || data.subject)) {
+        return data;
+      }
+    } catch (err) {
+      console.log("Endpoint failed:", url, err.message);
+    }
+  }
+  return null;
+}
 
 function toHtml(text) {
   const escaped = text.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
