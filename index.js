@@ -25,7 +25,6 @@ When Matt forwards an email or pastes one in, read it and figure out what's need
 
 You have no tools — just respond conversationally in plain text. If you're drafting an email, format it clearly. If there are tasks or schedule items, list them cleanly. No JSON, no structured output — just a natural email response that's easy to read.`;
 
-// Redis setup without top-level await
 const redis = createClient({ url: process.env.REDIS_URL });
 redis.on("error", (err) => console.error("Redis error:", err));
 
@@ -35,20 +34,40 @@ app.get("/", (req, res) => res.send("Running ✓"));
 
 app.post("/inbound", async (req, res) => {
   res.sendStatus(200);
+
+  // Log the full payload so we can see exactly what Resend sends
+  console.log("Webhook payload:", JSON.stringify(req.body, null, 2));
+
   try {
     const event = req.body;
-    if (event.type !== "email.received") return;
-
-    const { email_id, from, subject } = event.data;
-
-    const emailContent = await fetchEmailContent(email_id);
-    if (!emailContent) {
-      console.error("Could not fetch email content for:", email_id);
+    if (event.type !== "email.received") {
+      console.log("Ignoring event type:", event.type);
       return;
     }
 
-    const body = emailContent.text || stripHtml(emailContent.html) || "";
-    if (!body.trim()) return;
+    const data = event.data || {};
+    const from = data.from || "";
+    const subject = data.subject || "";
+
+    // Try all possible locations for email body
+    const body = data.text || data.plain_text || data.html_body || stripHtml(data.html) || "";
+
+    console.log("From:", from);
+    console.log("Subject:", subject);
+    console.log("Body length:", body.length);
+    console.log("Available data keys:", Object.keys(data));
+
+    if (!body.trim()) {
+      console.log("No body found in payload, attempting API fetch...");
+      // Try fetching via Resend SDK
+      try {
+        const emailData = await resend.emails.get(data.email_id);
+        console.log("SDK fetch result:", JSON.stringify(emailData, null, 2));
+      } catch (e) {
+        console.log("SDK fetch failed:", e.message);
+      }
+      return;
+    }
 
     const senderEmail = parseEmail(from);
     const allowedEmails = (process.env.ALLOWED_EMAILS || YOUR_EMAIL).split(",").map(e => e.trim().toLowerCase());
@@ -57,16 +76,11 @@ app.post("/inbound", async (req, res) => {
       return;
     }
 
-    const inReplyTo = emailContent.headers?.find(h => h.name?.toLowerCase() === "in-reply-to")?.value || "";
-
-    console.log(`Message from Matt | Subject: ${subject}`);
-
     const cleanedBody = cleanQuotedText(body);
     if (!cleanedBody.trim()) return;
 
     const raw = await redis.get(THREAD_KEY);
     const history = raw ? JSON.parse(raw) : [];
-
     history.push({ role: "user", content: cleanedBody });
 
     const response = await anthropic.messages.create({
@@ -77,44 +91,23 @@ app.post("/inbound", async (req, res) => {
     });
 
     const reply = response.content.map((b) => b.text || "").join("").trim();
-
     history.push({ role: "assistant", content: reply });
     const trimmed = history.length > 40 ? history.slice(-40) : history;
     await redis.set(THREAD_KEY, JSON.stringify(trimmed));
 
-    const emailOpts = {
+    await resend.emails.send({
       from: `Claude <${ASSISTANT_EMAIL}>`,
       to: senderEmail,
       subject: subject?.startsWith("Re:") ? subject : `Re: ${subject}`,
       text: reply,
       html: toHtml(reply),
-    };
-    if (inReplyTo) {
-      emailOpts.headers = { "In-Reply-To": inReplyTo, "References": inReplyTo };
-    }
+    });
 
-    await resend.emails.send(emailOpts);
     console.log("Reply sent to:", senderEmail);
   } catch (err) {
     console.error("Error:", err);
   }
 });
-
-async function fetchEmailContent(emailId) {
-  try {
-    const response = await fetch(`https://api.resend.com/emails/receiving/${emailId}`, {
-      headers: { Authorization: `Bearer ${process.env.RESEND_API_KEY}` },
-    });
-    if (!response.ok) {
-      console.error("Resend API error:", response.status, await response.text());
-      return null;
-    }
-    return await response.json();
-  } catch (err) {
-    console.error("Failed to fetch email content:", err);
-    return null;
-  }
-}
 
 function toHtml(text) {
   const escaped = text.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
@@ -144,7 +137,6 @@ function cleanQuotedText(text = "") {
     .trim();
 }
 
-// Start server then connect Redis
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, async () => {
   console.log(`Listening on port ${PORT}`);
