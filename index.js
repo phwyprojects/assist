@@ -47,7 +47,7 @@ app.post("/inbound", async (req, res) => {
     const event = req.body;
     if (event.type !== "email.received") return;
 
-    const { email_id, from, subject } = event.data;
+    const { email_id, from, subject, cc = [] } = event.data;
     console.log(`Received | From: ${from} | Subject: ${subject}`);
 
     const emailContent = await fetchReceivedEmail(email_id);
@@ -75,7 +75,7 @@ app.post("/inbound", async (req, res) => {
 
     if (memoryMatch) {
       await addMemory(memoryMatch[1].trim());
-      await sendReply(senderEmail, subject, `Got it, saved to permanent memory:\n\n"${memoryMatch[1].trim()}"`);
+      await sendReply(senderEmail, subject, `Got it, saved to permanent memory:\n\n"${memoryMatch[1].trim()}"`, null);
       return;
     }
 
@@ -164,7 +164,8 @@ app.post("/inbound", async (req, res) => {
     const trimmed = history.length > 40 ? history.slice(-40) : history;
     await redis.set(THREAD_KEY, JSON.stringify(trimmed));
 
-    await sendReply(senderEmail, subject, reply);
+    const ccEmails = cc.map(c => parseEmail(c)).filter(e => e && e !== senderEmail);
+    await sendReply(senderEmail, subject, reply, ccEmails.length ? ccEmails : null);
     console.log("Reply sent to:", senderEmail);
   } catch (err) {
     console.error("Error:", err);
@@ -230,14 +231,16 @@ async function removeMemory(item) {
   return false;
 }
 
-async function sendReply(to, subject, text) {
-  await resend.emails.send({
+async function sendReply(to, subject, text, cc = null) {
+  const opts = {
     from: `MP <${ASSISTANT_EMAIL}>`,
     to,
     subject: subject?.startsWith("Re:") ? subject : `Re: ${subject}`,
     text,
     html: toHtml(text),
-  });
+  };
+  if (cc && cc.length) opts.cc = cc;
+  await resend.emails.send(opts);
 }
 
 async function fetchReceivedEmail(emailId) {
