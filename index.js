@@ -12,9 +12,8 @@ const resend = new Resend(process.env.RESEND_API_KEY);
 
 const YOUR_EMAIL = process.env.YOUR_EMAIL;
 const ASSISTANT_EMAIL = process.env.ASSISTANT_EMAIL;
-
-// Google Sheet ID extracted from the shared URL
-const SHEET_ID = "123efb9NVIO8D0C-gBSpcrubqKqSMrB8vm2OYsLNh7iA";
+const GOOGLE_API_KEY = process.env.GOOGLE_API_KEY;
+const SHEET_ID = process.env.SHEET_ID;
 
 const BASE_SYSTEM_PROMPT = `You are MP, a smart and efficient assistant for Matt, an artist manager. Matt manages an artist named Ninajirachi.
 
@@ -85,24 +84,22 @@ app.post("/inbound", async (req, res) => {
       return;
     }
 
-    // Fetch schedule and memories in parallel
-    const [memories, scheduleData] = await Promise.all([
+    // Fetch memories and all sheet tabs in parallel
+    const [memories, sheetData] = await Promise.all([
       getMemories(),
-      fetchSchedule(),
+      fetchAllSheetTabs(),
     ]);
 
-    // Build system prompt
     const memoryContext = memories.length
-      ? `\n\nPermanent context (always remember this):\n${memories.map(m => `- ${m}`).join("\n")}`
+      ? `\n\nPermanent context:\n${memories.map(m => `- ${m}`).join("\n")}`
       : "";
 
-    const scheduleContext = scheduleData
-      ? `\n\nCurrent tour schedule (live from Google Sheet):\n${scheduleData}`
+    const sheetContext = sheetData
+      ? `\n\nGoogle Sheet data (all tabs):\n${sheetData}`
       : "";
 
-    const systemPrompt = BASE_SYSTEM_PROMPT + memoryContext + scheduleContext;
+    const systemPrompt = BASE_SYSTEM_PROMPT + memoryContext + sheetContext;
 
-    // Load conversation history
     const raw = await redis.get(THREAD_KEY);
     const history = raw ? JSON.parse(raw) : [];
     history.push({ role: "user", content: cleanedBody });
@@ -126,24 +123,36 @@ app.post("/inbound", async (req, res) => {
   }
 });
 
-// Fetch Google Sheet as CSV and convert to readable text
-async function fetchSchedule() {
+// Fetch all tabs from Google Sheet using Sheets API
+async function fetchAllSheetTabs() {
+  if (!SHEET_ID || !GOOGLE_API_KEY) return null;
   try {
-    const csvUrl = `https://docs.google.com/spreadsheets/d/${SHEET_ID}/export?format=csv`;
-    const response = await fetch(csvUrl);
-    if (!response.ok) {
-      console.error("Failed to fetch schedule:", response.status);
+    // First get the list of sheets/tabs
+    const metaUrl = `https://sheets.googleapis.com/v4/spreadsheets/${SHEET_ID}?key=${GOOGLE_API_KEY}&fields=sheets.properties`;
+    const metaRes = await fetch(metaUrl);
+    if (!metaRes.ok) {
+      console.error("Sheets API meta error:", metaRes.status);
       return null;
     }
-    const csv = await response.text();
-    // Convert CSV to readable plain text table
-    const rows = csv.split("\n").map(row =>
-      row.split(",").map(cell => cell.replace(/^"|"$/g, "").trim())
-    ).filter(row => row.some(cell => cell));
+    const meta = await metaRes.json();
+    const tabs = meta.sheets.map(s => s.properties.title);
+    console.log("Sheet tabs:", tabs);
 
-    return rows.map(row => row.join(" | ")).join("\n");
+    // Fetch each tab's data
+    const tabResults = await Promise.all(tabs.map(async (tab) => {
+      const url = `https://sheets.googleapis.com/v4/spreadsheets/${SHEET_ID}/values/${encodeURIComponent(tab)}?key=${GOOGLE_API_KEY}`;
+      const res = await fetch(url);
+      if (!res.ok) return null;
+      const data = await res.json();
+      const rows = data.values || [];
+      if (rows.length === 0) return null;
+      const text = rows.map(row => row.join(" | ")).join("\n");
+      return `=== ${tab} ===\n${text}`;
+    }));
+
+    return tabResults.filter(Boolean).join("\n\n");
   } catch (err) {
-    console.error("Schedule fetch error:", err);
+    console.error("Sheet fetch error:", err);
     return null;
   }
 }
