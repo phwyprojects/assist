@@ -14,6 +14,7 @@ const YOUR_EMAIL = process.env.YOUR_EMAIL;
 const ASSISTANT_EMAIL = process.env.ASSISTANT_EMAIL;
 const GOOGLE_API_KEY = process.env.GOOGLE_API_KEY;
 const SHEET_ID = process.env.SHEET_ID;
+const CONTEXT_SHEET_ID = process.env.CONTEXT_SHEET_ID;
 
 const BASE_SYSTEM_PROMPT = `You are MP, a smart and efficient assistant for Matt, an artist manager. Matt manages an artist named Ninajirachi.
 
@@ -84,10 +85,11 @@ app.post("/inbound", async (req, res) => {
       return;
     }
 
-    // Fetch memories and all sheet tabs in parallel
-    const [memories, sheetData] = await Promise.all([
+    // Fetch memories and both sheets in parallel
+    const [memories, sheetData, contextData] = await Promise.all([
       getMemories(),
-      fetchAllSheetTabs(),
+      fetchAllSheetTabs(SHEET_ID),
+      fetchAllSheetTabs(CONTEXT_SHEET_ID),
     ]);
 
     const memoryContext = memories.length
@@ -95,10 +97,14 @@ app.post("/inbound", async (req, res) => {
       : "";
 
     const sheetContext = sheetData
-      ? `\n\nGoogle Sheet data (all tabs):\n${sheetData}`
+      ? `\n\nTour schedule (Google Sheet):\n${sheetData}`
       : "";
 
-    const systemPrompt = BASE_SYSTEM_PROMPT + memoryContext + sheetContext;
+    const contextSheetContext = contextData
+      ? `\n\nKey context and info:\n${contextData}`
+      : "";
+
+    const systemPrompt = BASE_SYSTEM_PROMPT + memoryContext + sheetContext + contextSheetContext;
 
     const raw = await redis.get(THREAD_KEY);
     const history = raw ? JSON.parse(raw) : [];
@@ -124,11 +130,11 @@ app.post("/inbound", async (req, res) => {
 });
 
 // Fetch all tabs from Google Sheet using Sheets API
-async function fetchAllSheetTabs() {
-  if (!SHEET_ID || !GOOGLE_API_KEY) return null;
+async function fetchAllSheetTabs(sheetId) {
+  if (!sheetId || !GOOGLE_API_KEY) return null;
   try {
     // First get the list of sheets/tabs
-    const metaUrl = `https://sheets.googleapis.com/v4/spreadsheets/${SHEET_ID}?key=${GOOGLE_API_KEY}&fields=sheets.properties`;
+    const metaUrl = `https://sheets.googleapis.com/v4/spreadsheets/${sheetId}?key=${GOOGLE_API_KEY}&fields=sheets.properties`;
     const metaRes = await fetch(metaUrl);
     if (!metaRes.ok) {
       console.error("Sheets API meta error:", metaRes.status);
@@ -140,7 +146,7 @@ async function fetchAllSheetTabs() {
 
     // Fetch each tab's data
     const tabResults = await Promise.all(tabs.map(async (tab) => {
-      const url = `https://sheets.googleapis.com/v4/spreadsheets/${SHEET_ID}/values/${encodeURIComponent(tab)}?key=${GOOGLE_API_KEY}`;
+      const url = `https://sheets.googleapis.com/v4/spreadsheets/${sheetId}/values/${encodeURIComponent(tab)}?key=${GOOGLE_API_KEY}`;
       const res = await fetch(url);
       if (!res.ok) return null;
       const data = await res.json();
