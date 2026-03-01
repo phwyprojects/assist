@@ -97,11 +97,14 @@ app.post("/inbound", async (req, res) => {
     // Extract URLs from email and fetch content
     const urls = extractUrls(cleanedBody);
     const attachmentMeta = event.data.attachments || [];
+    // Only fetch Seated shows when explicitly asked
+    const wantsShows = /announced shows|confirmed shows|show list|tour dates|seated|upcoming shows/i.test(cleanedBody);
+
     const [memories, sheetData, contextData, seatedShows, attachments, ...urlContents] = await Promise.all([
       getMemories(),
       fetchAllSheetTabs(SHEET_ID),
       fetchAllSheetTabs(CONTEXT_SHEET_ID),
-      fetchSeatedShows(),
+      wantsShows ? fetchSeatedShows() : Promise.resolve(null),
       fetchAttachments(email_id, attachmentMeta),
       ...urls.map(url => fetchUrl(url)),
     ]);
@@ -397,7 +400,7 @@ async function fetchSeatedShows() {
     console.log("Fetching Seated shows...");
     const response = await fetch(
       "https://cdn.seated.com/api/tour/22d23327-0a5a-4431-826d-3baa90fd57e0?include=tour-events",
-      { headers: { "Accept": "application/json" } }
+      { headers: { "Accept": "application/vnd.api+json", "User-Agent": "Mozilla/5.0" } }
     );
     console.log("Seated response status:", response.status);
     if (!response.ok) return null;
