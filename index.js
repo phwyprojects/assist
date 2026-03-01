@@ -65,6 +65,8 @@ app.post("/inbound", async (req, res) => {
 
     const cleanedBody = cleanQuotedText(body);
     if (!cleanedBody.trim()) return;
+    console.log("Cleaned body:", cleanedBody.slice(0, 300));
+    console.log("URLs found:", extractUrls(cleanedBody));
 
     // Memory commands
     const memoryMatch = cleanedBody.match(/^remember[:\s]+(.+)/is);
@@ -115,16 +117,12 @@ app.post("/inbound", async (req, res) => {
       ? `\n\nKey context and info:\n${contextData}`
       : "";
 
-    const urlContext = urlContents.filter(Boolean).length
-      ? `\n\nContent from links in your email:\n${urlContents.filter(Boolean).map((c, i) => `--- ${urls[i]} ---\n${c}`).join("\n\n")}`
-      : "";
-
-    const systemPrompt = BASE_SYSTEM_PROMPT + memoryContext + sheetContext + contextSheetContext + urlContext;
+    const systemPrompt = BASE_SYSTEM_PROMPT + memoryContext + sheetContext + contextSheetContext;
 
     const raw = await redis.get(THREAD_KEY);
     const history = raw ? JSON.parse(raw) : [];
 
-    // Build user message content with attachments if present
+    // Build user message - include URL content and attachments inline
     const userContent = [];
     if (attachments && attachments.length > 0) {
       for (const att of attachments) {
@@ -135,7 +133,14 @@ app.post("/inbound", async (req, res) => {
         }
       }
     }
-    userContent.push({ type: "text", text: cleanedBody });
+
+    // Append URL content directly to user message text
+    const fetchedUrls = urlContents.filter(Boolean);
+    const urlSection = fetchedUrls.length
+      ? "\n\n---\nI fetched the following URLs for you:\n" + fetchedUrls.map((c, i) => `[${urls[i]}]:\n${c}`).join("\n\n")
+      : "";
+
+    userContent.push({ type: "text", text: cleanedBody + urlSection });
 
     history.push({ role: "user", content: userContent });
 
