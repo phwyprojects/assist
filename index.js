@@ -25,10 +25,9 @@ When Matt forwards an email or pastes one in, read it and figure out what's need
 
 You have no tools — just respond conversationally in plain text. If you're drafting an email, format it clearly. If there are tasks or schedule items, list them cleanly. No JSON, no structured output — just a natural email response that's easy to read.`;
 
+// Redis setup without top-level await
 const redis = createClient({ url: process.env.REDIS_URL });
 redis.on("error", (err) => console.error("Redis error:", err));
-await redis.connect();
-console.log("Redis connected ✓");
 
 const THREAD_KEY = "matt:conversation";
 
@@ -38,13 +37,10 @@ app.post("/inbound", async (req, res) => {
   res.sendStatus(200);
   try {
     const event = req.body;
-
-    // Resend wraps the payload in event.type / event.data
     if (event.type !== "email.received") return;
 
     const { email_id, from, subject } = event.data;
 
-    // Fetch the actual email content from Resend API
     const emailContent = await fetchEmailContent(email_id);
     if (!emailContent) {
       console.error("Could not fetch email content for:", email_id);
@@ -62,14 +58,12 @@ app.post("/inbound", async (req, res) => {
     }
 
     const inReplyTo = emailContent.headers?.find(h => h.name?.toLowerCase() === "in-reply-to")?.value || "";
-    const messageId = emailContent.headers?.find(h => h.name?.toLowerCase() === "message-id")?.value || `${Date.now()}`;
 
     console.log(`Message from Matt | Subject: ${subject}`);
 
     const cleanedBody = cleanQuotedText(body);
     if (!cleanedBody.trim()) return;
 
-    // Load conversation history
     const raw = await redis.get(THREAD_KEY);
     const history = raw ? JSON.parse(raw) : [];
 
@@ -90,7 +84,7 @@ app.post("/inbound", async (req, res) => {
 
     const emailOpts = {
       from: `Claude <${ASSISTANT_EMAIL}>`,
-      to: YOUR_EMAIL,
+      to: senderEmail,
       subject: subject?.startsWith("Re:") ? subject : `Re: ${subject}`,
       text: reply,
       html: toHtml(reply),
@@ -100,19 +94,16 @@ app.post("/inbound", async (req, res) => {
     }
 
     await resend.emails.send(emailOpts);
-    console.log("Reply sent to Matt");
+    console.log("Reply sent to:", senderEmail);
   } catch (err) {
     console.error("Error:", err);
   }
 });
 
-// Fetch full email content from Resend's receiving API
 async function fetchEmailContent(emailId) {
   try {
     const response = await fetch(`https://api.resend.com/emails/receiving/${emailId}`, {
-      headers: {
-        Authorization: `Bearer ${process.env.RESEND_API_KEY}`,
-      },
+      headers: { Authorization: `Bearer ${process.env.RESEND_API_KEY}` },
     });
     if (!response.ok) {
       console.error("Resend API error:", response.status, await response.text());
@@ -153,5 +144,14 @@ function cleanQuotedText(text = "") {
     .trim();
 }
 
+// Start server then connect Redis
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log(`Listening on port ${PORT}`));
+app.listen(PORT, async () => {
+  console.log(`Listening on port ${PORT}`);
+  try {
+    await redis.connect();
+    console.log("Redis connected ✓");
+  } catch (err) {
+    console.error("Redis connection failed:", err);
+  }
+});
