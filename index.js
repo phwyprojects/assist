@@ -87,10 +87,12 @@ app.post("/inbound", async (req, res) => {
 
     // Extract URLs from email and fetch content
     const urls = extractUrls(cleanedBody);
-    const [memories, sheetData, contextData, ...urlContents] = await Promise.all([
+    const attachmentMeta = event.data.attachments || [];
+    const [memories, sheetData, contextData, attachments, ...urlContents] = await Promise.all([
       getMemories(),
       fetchAllSheetTabs(SHEET_ID),
       fetchAllSheetTabs(CONTEXT_SHEET_ID),
+      fetchAttachments(email_id, attachmentMeta),
       ...urls.map(url => fetchUrl(url)),
     ]);
 
@@ -114,7 +116,21 @@ app.post("/inbound", async (req, res) => {
 
     const raw = await redis.get(THREAD_KEY);
     const history = raw ? JSON.parse(raw) : [];
-    history.push({ role: "user", content: cleanedBody });
+
+    // Build user message content with attachments if present
+    const userContent = [];
+    if (attachments && attachments.length > 0) {
+      for (const att of attachments) {
+        if (att.type === "document") {
+          userContent.push({ type: "document", source: { type: "base64", media_type: att.media_type, data: att.data } });
+        } else if (att.type === "image") {
+          userContent.push({ type: "image", source: { type: "base64", media_type: att.media_type, data: att.data } });
+        }
+      }
+    }
+    userContent.push({ type: "text", text: cleanedBody });
+
+    history.push({ role: "user", content: userContent });
 
     const response = await anthropic.messages.create({
       model: "claude-sonnet-4-20250514",
@@ -297,4 +313,48 @@ async function fetchUrl(url) {
     console.log("URL fetch failed:", url, err.message);
     return null;
   }
+}
+
+// Fetch attachments from Resend and convert to base64
+async function fetchAttachments(emailId, attachmentMeta) {
+  if (!attachmentMeta || attachmentMeta.length === 0) return [];
+  
+  const results = [];
+  for (const att of attachmentMeta.slice(0, 5)) { // max 5 attachments
+    try {
+      console.log("Fetching attachment:", att.filename, att.content_type);
+      
+      // Fetch attachment from Resend attachments API
+      const url = `https://api.resend.com/emails/receiving/${emailId}/attachments/${att.id}`;
+      const response = await fetch(url, {
+        headers: { Authorization: `Bearer ${process.env.RESEND_API_KEY}` },
+      });
+      
+      if (!response.ok) {
+        console.log("Attachment fetch failed:", response.status);
+        continue;
+      }
+      
+      const data = await response.json();
+      const base64Data = data.content; // Resend returns base64 content
+      
+      if (!base64Data) continue;
+      
+      const ct = att.content_type || "";
+      
+      if (ct === "application/pdf") {
+        results.push({ type: "document", media_type: "application/pdf", data: base64Data });
+      } else if (ct.includes("image/")) {
+        const imgType = ct.includes("png") ? "image/png" : ct.includes("gif") ? "image/gif" : ct.includes("webp") ? "image/webp" : "image/jpeg";
+        results.push({ type: "image", media_type: imgType, data: base64Data });
+      } else if (ct.includes("word") || ct.includes("document") || att.filename?.endsWith(".docx") || att.filename?.endsWith(".doc")) {
+        // Word docs — treat as document with PDF media type won't work, extract as text note
+        results.push({ type: "document", media_type: "application/pdf", data: base64Data });
+      }
+    } catch (err) {
+      console.log("Attachment error:", err.message);
+    }
+  }
+  
+  return results;
 }
