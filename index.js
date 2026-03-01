@@ -101,11 +101,17 @@ app.post("/inbound", async (req, res) => {
     // Only fetch Seated shows when explicitly asked
     const wantsShows = /announced|confirmed shows|show list|tour dates|seated|upcoming shows|what shows|which shows|nina.*shows|shows.*nina/i.test(cleanedBody);
 
-    const [memories, sheetData, contextData, seatedShows, attachments, ...urlContents] = await Promise.all([
+    // Spotify track lookup
+    const spotifyMatch = cleanedBody.match(/(?:isrc|track length|duration|spotify).*?["‘’“”]?([^"\n]{3,60})["‘’“”]?/i)
+      || cleanedBody.match(/(?:look up|find|get|search).*?(?:track|song)[^\w]+([\w][^
+]{3,60})/i);
+
+    const [memories, sheetData, contextData, seatedShows, spotifyData, attachments, ...urlContents] = await Promise.all([
       getMemories(),
       fetchAllSheetTabs(SHEET_ID),
       fetchAllSheetTabs(CONTEXT_SHEET_ID),
       wantsShows ? fetchSeatedShows() : Promise.resolve(null),
+      spotifyMatch ? searchSpotifyTrack(spotifyMatch[1].trim()) : Promise.resolve(null),
       fetchAttachments(email_id, attachmentMeta),
       ...urls.map(url => fetchUrl(url)),
     ]);
@@ -126,7 +132,11 @@ app.post("/inbound", async (req, res) => {
       ? `\n\nKey context and info:\n${contextData}`
       : "";
 
-    const systemPrompt = BASE_SYSTEM_PROMPT + memoryContext + sheetContext + seatedContext + contextSheetContext;
+    const spotifyContext = spotifyData
+      ? `\n\nSpotify track data:\n${spotifyData}`
+      : "";
+
+    const systemPrompt = BASE_SYSTEM_PROMPT + memoryContext + sheetContext + seatedContext + contextSheetContext + spotifyContext;
 
     const raw = await redis.get(THREAD_KEY);
     const history = raw ? JSON.parse(raw) : [];
@@ -446,6 +456,38 @@ async function fetchSeatedShows() {
     return lines.join("\n");
   } catch (err) {
     console.error("Seated fetch error:", err);
+    return null;
+  }
+}
+
+// Spotify API
+async function getSpotifyToken() {
+  const creds = Buffer.from(`${process.env.SPOTIFY_CLIENT_ID}:${process.env.SPOTIFY_CLIENT_SECRET}`).toString("base64");
+  const response = await fetch("https://accounts.spotify.com/api/token", {
+    method: "POST",
+    headers: { "Authorization": `Basic ${creds}`, "Content-Type": "application/x-www-form-urlencoded" },
+    body: "grant_type=client_credentials",
+  });
+  const data = await response.json();
+  return data.access_token;
+}
+
+async function searchSpotifyTrack(query) {
+  try {
+    const token = await getSpotifyToken();
+    const url = `https://api.spotify.com/v1/search?q=${encodeURIComponent(query)}&type=track&limit=5`;
+    const response = await fetch(url, { headers: { Authorization: `Bearer ${token}` } });
+    const data = await response.json();
+    const tracks = data.tracks?.items || [];
+    if (!tracks.length) return "No tracks found.";
+    return tracks.map(t => {
+      const mins = Math.floor(t.duration_ms / 60000);
+      const secs = String(Math.floor((t.duration_ms % 60000) / 1000)).padStart(2, "0");
+      const isrc = t.external_ids?.isrc || "N/A";
+      return `${t.name} — ${t.artists.map(a => a.name).join(", ")}\nISRC: ${isrc}\nLength: ${mins}:${secs}\nAlbum: ${t.album.name} (${t.album.release_date?.slice(0,4)})`;
+    }).join("\n\n");
+  } catch (err) {
+    console.error("Spotify error:", err);
     return null;
   }
 }
