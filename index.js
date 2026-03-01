@@ -42,7 +42,8 @@ app.post("/inbound", async (req, res) => {
     if (!body.trim()) return;
 
     const senderEmail = parseEmail(from);
-    if (senderEmail.toLowerCase() !== YOUR_EMAIL.toLowerCase()) {
+    const allowedEmails = (process.env.ALLOWED_EMAILS || YOUR_EMAIL).split(",").map(e => e.trim().toLowerCase());
+    if (!allowedEmails.includes(senderEmail.toLowerCase())) {
       console.log(`Ignoring email from unknown sender: ${senderEmail}`);
       return;
     }
