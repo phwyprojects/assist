@@ -13,22 +13,21 @@ const resend = new Resend(process.env.RESEND_API_KEY);
 const YOUR_EMAIL = process.env.YOUR_EMAIL;
 const ASSISTANT_EMAIL = process.env.ASSISTANT_EMAIL;
 
-const SYSTEM_PROMPT = `You are a smart, efficient assistant for Matt, an artist manager. Matt manages an artist named Ninajirachi.
+const BASE_SYSTEM_PROMPT = `You are MP, a smart and efficient assistant for Matt, an artist manager. Matt manages an artist named Ninajirachi.
 
-Matt will email you directly to get things done — asking questions, forwarding emails from promoters or press, thinking through decisions, drafting communications, managing the tour schedule, keeping track of tasks. Treat every message as a direct conversation with Matt.
-
-As you work together, you'll learn more about Ninajirachi, the team, preferences, and how Matt likes things handled. Build on that context over time.
+Matt will email you directly to get things done — asking questions, forwarding emails from promoters or press, thinking through decisions, drafting communications, managing the tour schedule, keeping track of tasks.
 
 Tone: Sharp and direct. Matt is busy. Don't pad responses. Get to the point, then offer to go deeper if needed.
 
 When Matt forwards an email or pastes one in, read it and figure out what's needed — a reply draft, a task, a schedule item, or just a summary and your take on it.
 
-You have no tools — just respond conversationally in plain text. If you're drafting an email, format it clearly. If there are tasks or schedule items, list them cleanly. No JSON, no structured output — just a natural email response that's easy to read.`;
+Respond in plain text. If you're drafting an email, format it clearly. If there are tasks or schedule items, list them cleanly.`;
 
 const redis = createClient({ url: process.env.REDIS_URL });
 redis.on("error", (err) => console.error("Redis error:", err));
 
 const THREAD_KEY = "matt:conversation";
+const MEMORY_KEY = "matt:memory";
 
 app.get("/", (req, res) => res.send("Running ✓"));
 
@@ -39,21 +38,13 @@ app.post("/inbound", async (req, res) => {
     if (event.type !== "email.received") return;
 
     const { email_id, from, subject } = event.data;
-    console.log(`Received email | From: ${from} | Subject: ${subject} | ID: ${email_id}`);
+    console.log(`Received | From: ${from} | Subject: ${subject}`);
 
-    // Fetch the full email content using the receiving API
     const emailContent = await fetchReceivedEmail(email_id);
     if (!emailContent) return;
 
-    console.log("Email content keys:", Object.keys(emailContent));
-
     const body = emailContent.text || emailContent.plain_text || stripHtml(emailContent.html) || "";
-    console.log("Body length:", body.length, "| Body preview:", body.slice(0, 100));
-
-    if (!body.trim()) {
-      console.log("Empty body, skipping");
-      return;
-    }
+    if (!body.trim()) return;
 
     const senderEmail = parseEmail(from);
     const allowedEmails = (process.env.ALLOWED_EMAILS || YOUR_EMAIL).split(",").map(e => e.trim().toLowerCase());
@@ -65,6 +56,58 @@ app.post("/inbound", async (req, res) => {
     const cleanedBody = cleanQuotedText(body);
     if (!cleanedBody.trim()) return;
 
+    // Check if this is a memory command
+    const memoryMatch = cleanedBody.match(/^remember[:\s]+(.+)/is);
+    const forgetMatch = cleanedBody.match(/^forget[:\s]+(.+)/is);
+    const showMemoryMatch = cleanedBody.match(/^(show memory|what do you remember|memory)/i);
+
+    if (memoryMatch) {
+      await addMemory(memoryMatch[1].trim());
+      await resend.emails.send({
+        from: `MP <${ASSISTANT_EMAIL}>`,
+        to: senderEmail,
+        subject: subject?.startsWith("Re:") ? subject : `Re: ${subject}`,
+        text: `Got it, I've saved that to permanent memory:\n\n"${memoryMatch[1].trim()}"`,
+        html: toHtml(`Got it, I've saved that to permanent memory:\n\n"${memoryMatch[1].trim()}"`),
+      });
+      return;
+    }
+
+    if (forgetMatch) {
+      const removed = await removeMemory(forgetMatch[1].trim());
+      await resend.emails.send({
+        from: `MP <${ASSISTANT_EMAIL}>`,
+        to: senderEmail,
+        subject: subject?.startsWith("Re:") ? subject : `Re: ${subject}`,
+        text: removed ? `Removed from memory: "${forgetMatch[1].trim()}"` : `Couldn't find that in memory.`,
+        html: toHtml(removed ? `Removed from memory: "${forgetMatch[1].trim()}"` : `Couldn't find that in memory.`),
+      });
+      return;
+    }
+
+    if (showMemoryMatch) {
+      const memories = await getMemories();
+      const memText = memories.length
+        ? `Here's what I have in permanent memory:\n\n${memories.map((m, i) => `${i + 1}. ${m}`).join("\n")}`
+        : `Nothing in permanent memory yet. Email "remember: [something]" to add things.`;
+      await resend.emails.send({
+        from: `MP <${ASSISTANT_EMAIL}>`,
+        to: senderEmail,
+        subject: subject?.startsWith("Re:") ? subject : `Re: ${subject}`,
+        text: memText,
+        html: toHtml(memText),
+      });
+      return;
+    }
+
+    // Build system prompt with permanent memory injected
+    const memories = await getMemories();
+    const memoryContext = memories.length
+      ? `\n\nPermanent context (always remember this):\n${memories.map((m, i) => `- ${m}`).join("\n")}`
+      : "";
+    const systemPrompt = BASE_SYSTEM_PROMPT + memoryContext;
+
+    // Load recent conversation history
     const raw = await redis.get(THREAD_KEY);
     const history = raw ? JSON.parse(raw) : [];
     history.push({ role: "user", content: cleanedBody });
@@ -72,7 +115,7 @@ app.post("/inbound", async (req, res) => {
     const response = await anthropic.messages.create({
       model: "claude-sonnet-4-20250514",
       max_tokens: 1500,
-      system: SYSTEM_PROMPT,
+      system: systemPrompt,
       messages: history,
     });
 
@@ -95,30 +138,50 @@ app.post("/inbound", async (req, res) => {
   }
 });
 
-// Fetch received email content from Resend's receiving API
+// Memory functions
+async function getMemories() {
+  const raw = await redis.get(MEMORY_KEY);
+  return raw ? JSON.parse(raw) : [];
+}
+
+async function addMemory(item) {
+  const memories = await getMemories();
+  if (!memories.includes(item)) {
+    memories.push(item);
+    await redis.set(MEMORY_KEY, JSON.stringify(memories));
+  }
+  console.log("Memory added:", item);
+}
+
+async function removeMemory(item) {
+  const memories = await getMemories();
+  const filtered = memories.filter(m => !m.toLowerCase().includes(item.toLowerCase()));
+  if (filtered.length < memories.length) {
+    await redis.set(MEMORY_KEY, JSON.stringify(filtered));
+    return true;
+  }
+  return false;
+}
+
+// Fetch received email content
 async function fetchReceivedEmail(emailId) {
-  // Try multiple possible endpoint formats
   const endpoints = [
     `https://api.resend.com/emails/receiving/${emailId}`,
     `https://api.resend.com/receiving/emails/${emailId}`,
     `https://api.resend.com/emails/${emailId}`,
   ];
-
   for (const url of endpoints) {
     try {
-      console.log("Trying endpoint:", url);
       const response = await fetch(url, {
         headers: { Authorization: `Bearer ${process.env.RESEND_API_KEY}` },
       });
       const data = await response.json();
-      console.log(`Endpoint ${url} status:`, response.status, "| Keys:", Object.keys(data));
-      if (response.ok && (data.text || data.html || data.subject)) {
-        return data;
-      }
+      if (response.ok && (data.text || data.html || data.subject)) return data;
     } catch (err) {
       console.log("Endpoint failed:", url, err.message);
     }
   }
+  console.error("Could not fetch email content for:", emailId);
   return null;
 }
 
