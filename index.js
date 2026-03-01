@@ -427,10 +427,20 @@ async function fetchSeatedShows() {
       return null;
     }
 
+    // Log first event to check field names
+    if (events.length > 0) {
+      console.log("Sample Seated event attributes:", JSON.stringify(events[0].attributes, null, 2).slice(0, 500));
+    }
+
     const lines = events.map(e => {
       const a = e.attributes || {};
-      return `${a.starts_at_date || ""} | ${a.venue_name || ""} | ${a.city || ""}, ${a.country_code || ""} | ${a.ticket_status || ""}`;
-    });
+      const date = a.starts_at_date || a.starts_at || a.date || "";
+      const venue = a.venue_name || a.name || "";
+      const city = a.city || a.location || "";
+      const country = a.country_code || a.country || "";
+      const status = a.ticket_status || a.status || "";
+      return `${date} | ${venue} | ${city}, ${country} | ${status}`;
+    }).filter(line => line.replace(/\|/g, "").trim());
 
     console.log("Seated shows found:", lines.length);
     return lines.join("\n");
