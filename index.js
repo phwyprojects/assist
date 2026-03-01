@@ -99,7 +99,7 @@ app.post("/inbound", async (req, res) => {
     const urls = extractUrls(cleanedBody);
     const attachmentMeta = event.data.attachments || [];
     // Only fetch Seated shows when explicitly asked
-    const wantsShows = /announced shows|confirmed shows|show list|tour dates|seated|upcoming shows/i.test(cleanedBody);
+    const wantsShows = /announced|confirmed shows|show list|tour dates|seated|upcoming shows|what shows|which shows|nina.*shows|shows.*nina/i.test(cleanedBody);
 
     const [memories, sheetData, contextData, seatedShows, attachments, ...urlContents] = await Promise.all([
       getMemories(),
