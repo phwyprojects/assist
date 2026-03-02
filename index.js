@@ -144,7 +144,7 @@ app.post("/inbound", async (req, res) => {
         userContent.push({ type: "image", source: { type: "base64", media_type: att.media_type, data: att.data } });
       }
     }
-    userContent.push({ type: "text", text: cleanedBody });
+    userContent.push({ type: "text", text: "Subject: " + subject + "\n\n" + cleanedBody });
 
     const raw = await redis.get(THREAD_KEY);
     const history = raw ? JSON.parse(raw) : [];
