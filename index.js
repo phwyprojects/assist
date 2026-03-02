@@ -24,15 +24,14 @@ Tone: Sharp and direct. Matt is busy. Don't pad responses. Get to the point, the
 
 When Matt forwards an email or pastes one in, read it and figure out what's needed — a reply draft, a task, a schedule item, or just a summary and your take on it.
 
-You have access to:
-- Matt's live tour schedule (Google Sheet, always up to date)
-- A key context and info sheet with background on Ninajirachi, team, and ongoing projects
-- Live announced show data from Seated — when Matt asks about announced or confirmed shows, this data is fetched automatically and provided to you in the context below. Do not say you cannot access Seated or external APIs — you can, and the data will be present in your context when relevant.
-- The ability to read URLs that Matt pastes into emails — their content will be provided to you automatically
-- The ability to read PDF and image attachments that Matt sends or forwards
-- Permanent memory of things Matt has asked you to remember
+You have access to tools you can call at any time:
+- fetch_url: fetch any webpage or URL
+- search_spotify: search Spotify for track info including ISRC codes and track length
+- get_announced_shows: get Ninajirachi publicly announced shows from Seated
 
-Respond in plain text. If you're drafting an email, format it clearly. If there are tasks or schedule items, list them cleanly.`;
+Use these tools proactively whenever they would help answer Matt's question. Do not say you cannot access external data — use your tools.
+
+Respond in plain text. If you are drafting an email, format it clearly. If there are tasks or schedule items, list them cleanly.`;
 
 const redis = createClient({ url: process.env.REDIS_URL });
 redis.on("error", (err) => console.error("Redis error:", err));
@@ -40,7 +39,37 @@ redis.on("error", (err) => console.error("Redis error:", err));
 const THREAD_KEY = "matt:conversation";
 const MEMORY_KEY = "matt:memory";
 
-app.get("/", (req, res) => res.send("Running ✓"));
+const TOOLS = [
+  {
+    name: "fetch_url",
+    description: "Fetch the text content of any URL. Use when Matt pastes a link and wants you to read it.",
+    input_schema: {
+      type: "object",
+      properties: { url: { type: "string", description: "The URL to fetch" } },
+      required: ["url"]
+    }
+  },
+  {
+    name: "search_spotify",
+    description: "Search Spotify for a track. Returns track name, artist, ISRC code, duration, and album. Use when Matt asks for ISRC, track length, or any Spotify data.",
+    input_schema: {
+      type: "object",
+      properties: { query: { type: "string", description: "Search query e.g. Ninajirachi All I Am" } },
+      required: ["query"]
+    }
+  },
+  {
+    name: "get_announced_shows",
+    description: "Get Ninajirachi publicly announced upcoming shows from Seated. Use when Matt asks about announced, confirmed, or public shows.",
+    input_schema: {
+      type: "object",
+      properties: {},
+      required: []
+    }
+  }
+];
+
+app.get("/", (req, res) => res.send("Running"));
 
 app.post("/inbound", async (req, res) => {
   res.sendStatus(200);
@@ -49,7 +78,7 @@ app.post("/inbound", async (req, res) => {
     if (event.type !== "email.received") return;
 
     const { email_id, from, subject, cc = [] } = event.data;
-    console.log(`Received | From: ${from} | Subject: ${subject}`);
+    console.log("Received | From:", from, "| Subject:", subject);
 
     const emailContent = await fetchReceivedEmail(email_id);
     if (!emailContent) return;
@@ -60,14 +89,13 @@ app.post("/inbound", async (req, res) => {
     const senderEmail = parseEmail(from);
     const allowedEmails = (process.env.ALLOWED_EMAILS || YOUR_EMAIL).split(",").map(e => e.trim().toLowerCase());
     if (!allowedEmails.includes(senderEmail.toLowerCase())) {
-      console.log(`Ignoring unknown sender: ${senderEmail}`);
+      console.log("Ignoring unknown sender:", senderEmail);
       return;
     }
 
     const cleanedBody = cleanQuotedText(body);
     if (!cleanedBody.trim()) return;
-    console.log("Cleaned body:", cleanedBody.slice(0, 300));
-    console.log("URLs found:", extractUrls(cleanedBody));
+    console.log("Cleaned body:", cleanedBody.slice(0, 200));
 
     // Memory commands
     const memoryMatch = cleanedBody.match(/^remember[:\s]+(.+)/is);
@@ -76,109 +104,92 @@ app.post("/inbound", async (req, res) => {
 
     if (memoryMatch) {
       await addMemory(memoryMatch[1].trim());
-      await sendReply(senderEmail, subject, `Got it, saved to permanent memory:\n\n"${memoryMatch[1].trim()}"`, null);
+      await sendReply(senderEmail, subject, "Got it, saved to permanent memory:\n\n" + memoryMatch[1].trim(), null);
       return;
     }
-
     if (forgetMatch) {
       const removed = await removeMemory(forgetMatch[1].trim());
-      await sendReply(senderEmail, subject, removed ? `Removed from memory: "${forgetMatch[1].trim()}"` : `Couldn't find that in memory.`);
+      await sendReply(senderEmail, subject, removed ? "Removed from memory: " + forgetMatch[1].trim() : "Couldn't find that in memory.");
       return;
     }
-
     if (showMemoryMatch) {
       const memories = await getMemories();
       const memText = memories.length
-        ? `Permanent memory:\n\n${memories.map((m, i) => `${i + 1}. ${m}`).join("\n")}`
-        : `Nothing in permanent memory yet. Email "remember: [something]" to add things.`;
+        ? "Permanent memory:\n\n" + memories.map((m, i) => (i + 1) + ". " + m).join("\n")
+        : "Nothing in permanent memory yet.";
       await sendReply(senderEmail, subject, memText);
       return;
     }
 
-    // Extract URLs from email and fetch content
-    const urls = extractUrls(cleanedBody);
+    // Fetch always-on context
     const attachmentMeta = event.data.attachments || [];
-    // Only fetch Seated shows when explicitly asked
-    const wantsShows = /announced|confirmed shows|show list|tour dates|seated|upcoming shows|what shows|which shows|nina.*shows|shows.*nina/i.test(cleanedBody);
-
-    // Spotify track lookup
-    const wantsSpotify = /isrc|spotify|track length/i.test(cleanedBody);
-    console.log("wantsSpotify:", wantsSpotify, "| body snippet:", cleanedBody.slice(0,200));
-    const spotifyQueryMatch = cleanedBody.match(/\btrack\s+([A-Za-z][^?.!\n,]{2,50})/i) || cleanedBody.match(/(?:isrc|length|duration)\s+(?:for|of)\s+(?:\S+\s+){0,3}([A-Za-z][^?.!\n,]{2,50})/i);
-    // Extract track name - look for quoted text first, then words after "song/track"
-    const quotedTrack = cleanedBody.match(/["‘’“”]([^"'‘’“”
-]{2,60})["‘’“”]/);
-    const songWordTrack = cleanedBody.match(/(?:song|track)\s+([A-Z][^?.!\n,]{2,50})/i);
-    const spotifyQuery = wantsSpotify
-      ? (quotedTrack ? "Ninajirachi " + quotedTrack[1] : songWordTrack ? "Ninajirachi " + songWordTrack[1] : null)
-      : null;
-    console.log("spotifyQuery:", spotifyQuery);
-
-    const [memories, sheetData, contextData, seatedShows, spotifyData, attachments, ...urlContents] = await Promise.all([
+    const [memories, sheetData, contextData, attachments] = await Promise.all([
       getMemories(),
       fetchAllSheetTabs(SHEET_ID),
       fetchAllSheetTabs(CONTEXT_SHEET_ID),
-      wantsShows ? fetchSeatedShows() : Promise.resolve(null),
-      (wantsSpotify && spotifyQuery) ? searchSpotifyTrack(spotifyQuery) : Promise.resolve(null),
       fetchAttachments(email_id, attachmentMeta),
-      ...urls.map(url => fetchUrl(url)),
     ]);
 
-    const memoryContext = memories.length
-      ? `\n\nPermanent context:\n${memories.map(m => `- ${m}`).join("\n")}`
-      : "";
+    const memoryContext = memories.length ? "\n\nPermanent context:\n" + memories.map(m => "- " + m).join("\n") : "";
+    const sheetContext = sheetData ? "\n\nTour schedule (Google Sheet):\n" + sheetData : "";
+    const contextSheetContext = contextData ? "\n\nKey context and info:\n" + contextData : "";
+    const systemPrompt = BASE_SYSTEM_PROMPT + memoryContext + sheetContext + contextSheetContext;
 
-    const sheetContext = sheetData
-      ? `\n\nTour schedule (Google Sheet):\n${sheetData}`
-      : "";
-
-    const seatedContext = seatedShows
-      ? `\n\nUpcoming shows (live from Seated):\n${seatedShows}`
-      : "";
-
-    const contextSheetContext = contextData
-      ? `\n\nKey context and info:\n${contextData}`
-      : "";
-
-    const spotifyContext = spotifyData
-      ? `\n\nSpotify track data:\n${spotifyData}`
-      : "";
-
-    const systemPrompt = BASE_SYSTEM_PROMPT + memoryContext + sheetContext + seatedContext + contextSheetContext + spotifyContext;
+    // Build user message
+    const userContent = [];
+    for (const att of attachments) {
+      if (att.type === "document") {
+        userContent.push({ type: "document", source: { type: "base64", media_type: att.media_type, data: att.data } });
+      } else if (att.type === "image") {
+        userContent.push({ type: "image", source: { type: "base64", media_type: att.media_type, data: att.data } });
+      }
+    }
+    userContent.push({ type: "text", text: cleanedBody });
 
     const raw = await redis.get(THREAD_KEY);
     const history = raw ? JSON.parse(raw) : [];
+    history.push({ role: "user", content: userContent });
 
-    // Build user message - include URL content and attachments inline
-    const userContent = [];
-    if (attachments && attachments.length > 0) {
-      for (const att of attachments) {
-        if (att.type === "document") {
-          userContent.push({ type: "document", source: { type: "base64", media_type: att.media_type, data: att.data } });
-        } else if (att.type === "image") {
-          userContent.push({ type: "image", source: { type: "base64", media_type: att.media_type, data: att.data } });
+    // Agentic loop
+    let reply = null;
+    let currentMessages = [...history];
+
+    while (!reply) {
+      const response = await anthropic.messages.create({
+        model: "claude-sonnet-4-20250514",
+        max_tokens: 1500,
+        system: systemPrompt,
+        tools: TOOLS,
+        messages: currentMessages,
+      });
+
+      if (response.stop_reason === "end_turn") {
+        reply = response.content.map(b => b.text || "").join("").trim();
+        currentMessages.push({ role: "assistant", content: response.content });
+        break;
+      }
+
+      if (response.stop_reason === "tool_use") {
+        currentMessages.push({ role: "assistant", content: response.content });
+        const toolResults = [];
+        for (const block of response.content) {
+          if (block.type !== "tool_use") continue;
+          console.log("Tool call:", block.name, block.input);
+          let result = "";
+          try {
+            if (block.name === "fetch_url") result = await fetchUrl(block.input.url) || "Could not fetch URL.";
+            else if (block.name === "search_spotify") result = await searchSpotifyTrack(block.input.query) || "No results found.";
+            else if (block.name === "get_announced_shows") result = await fetchSeatedShows() || "No announced shows found.";
+          } catch (err) {
+            result = "Error: " + err.message;
+          }
+          console.log("Tool result (" + block.name + "):", result.slice(0, 100));
+          toolResults.push({ type: "tool_result", tool_use_id: block.id, content: result });
         }
+        currentMessages.push({ role: "user", content: toolResults });
       }
     }
 
-    // Append URL content directly to user message text
-    const fetchedUrls = urlContents.filter(Boolean);
-    const urlSection = fetchedUrls.length
-      ? "\n\n---\nI fetched the following URLs for you:\n" + fetchedUrls.map((c, i) => `[${urls[i]}]:\n${c}`).join("\n\n")
-      : "";
-
-    userContent.push({ type: "text", text: cleanedBody + urlSection });
-
-    history.push({ role: "user", content: userContent });
-
-    const response = await anthropic.messages.create({
-      model: "claude-sonnet-4-20250514",
-      max_tokens: 1500,
-      system: systemPrompt,
-      messages: history,
-    });
-
-    const reply = response.content.map((b) => b.text || "").join("").trim();
     history.push({ role: "assistant", content: reply });
     const trimmed = history.length > 40 ? history.slice(-40) : history;
     await redis.set(THREAD_KEY, JSON.stringify(trimmed));
@@ -186,75 +197,54 @@ app.post("/inbound", async (req, res) => {
     const ccEmails = cc.map(c => parseEmail(c)).filter(e => e && e !== senderEmail);
     await sendReply(senderEmail, subject, reply, ccEmails.length ? ccEmails : null);
     console.log("Reply sent to:", senderEmail);
+
   } catch (err) {
-    console.error("Error:", err);
+    console.error("Inbound error:", err);
   }
 });
 
-// Fetch all tabs from Google Sheet using Sheets API
-async function fetchAllSheetTabs(sheetId) {
-  if (!sheetId || !GOOGLE_API_KEY) return null;
+async function fetchReceivedEmail(emailId) {
   try {
-    // First get the list of sheets/tabs
-    const metaUrl = `https://sheets.googleapis.com/v4/spreadsheets/${sheetId}?key=${GOOGLE_API_KEY}&fields=sheets.properties`;
-    const metaRes = await fetch(metaUrl);
-    if (!metaRes.ok) {
-      console.error("Sheets API meta error:", metaRes.status);
-      return null;
-    }
-    const meta = await metaRes.json();
-    const tabs = meta.sheets.map(s => s.properties.title);
-    console.log("Sheet tabs:", tabs);
-
-    // Fetch each tab's data
-    const tabResults = await Promise.all(tabs.map(async (tab) => {
-      const url = `https://sheets.googleapis.com/v4/spreadsheets/${sheetId}/values/${encodeURIComponent(tab)}?key=${GOOGLE_API_KEY}`;
-      const res = await fetch(url);
-      if (!res.ok) return null;
-      const data = await res.json();
-      const rows = data.values || [];
-      if (rows.length === 0) return null;
-      const text = rows.map(row => row.join(" | ")).join("\n");
-      return `=== ${tab} ===\n${text}`;
-    }));
-
-    return tabResults.filter(Boolean).join("\n\n");
-  } catch (err) {
-    console.error("Sheet fetch error:", err);
-    return null;
-  }
+    const res = await fetch("https://api.resend.com/emails/receiving/" + emailId, {
+      headers: { Authorization: "Bearer " + process.env.RESEND_API_KEY },
+    });
+    if (!res.ok) { console.log("fetchReceivedEmail failed:", res.status); return null; }
+    return await res.json();
+  } catch (err) { console.error("fetchReceivedEmail error:", err); return null; }
 }
 
-// Memory functions
-async function getMemories() {
-  const raw = await redis.get(MEMORY_KEY);
-  return raw ? JSON.parse(raw) : [];
+function parseEmail(str) {
+  const m = str.match(/<([^>]+)>/);
+  return m ? m[1] : str.trim();
 }
 
-async function addMemory(item) {
-  const memories = await getMemories();
-  if (!memories.includes(item)) {
-    memories.push(item);
-    await redis.set(MEMORY_KEY, JSON.stringify(memories));
-  }
-  console.log("Memory added:", item);
+function stripHtml(html) {
+  if (!html) return "";
+  return html
+    .replace(/<script[^>]*>[\s\S]*?<\/script>/gi, "")
+    .replace(/<style[^>]*>[\s\S]*?<\/style>/gi, "")
+    .replace(/<[^>]+>/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
 }
 
-async function removeMemory(item) {
-  const memories = await getMemories();
-  const filtered = memories.filter(m => !m.toLowerCase().includes(item.toLowerCase()));
-  if (filtered.length < memories.length) {
-    await redis.set(MEMORY_KEY, JSON.stringify(filtered));
-    return true;
-  }
-  return false;
+function toHtml(text) {
+  return "<pre style='font-family:sans-serif;white-space:pre-wrap'>" + text.replace(/&/g, "&amp;").replace(/</g, "&lt;") + "</pre>";
+}
+
+function cleanQuotedText(text) {
+  return text
+    .replace(/^(On .+?wrote:)\s*/ms, "")
+    .replace(/^>.*$/gm, "")
+    .replace(/^[-_]{3,}[\s\S]*$/m, "")
+    .trim();
 }
 
 async function sendReply(to, subject, text, cc = null) {
   const opts = {
-    from: `MP <${ASSISTANT_EMAIL}>`,
+    from: "MP <" + ASSISTANT_EMAIL + ">",
     to,
-    subject: subject?.startsWith("Re:") ? subject : `Re: ${subject}`,
+    subject: subject && subject.startsWith("Re:") ? subject : "Re: " + subject,
     text,
     html: toHtml(text),
   };
@@ -262,77 +252,45 @@ async function sendReply(to, subject, text, cc = null) {
   await resend.emails.send(opts);
 }
 
-async function fetchReceivedEmail(emailId) {
-  const endpoints = [
-    `https://api.resend.com/emails/receiving/${emailId}`,
-    `https://api.resend.com/receiving/emails/${emailId}`,
-    `https://api.resend.com/emails/${emailId}`,
-  ];
-  for (const url of endpoints) {
-    try {
-      const response = await fetch(url, {
-        headers: { Authorization: `Bearer ${process.env.RESEND_API_KEY}` },
-      });
-      const data = await response.json();
-      if (response.ok && (data.text || data.html || data.subject)) return data;
-    } catch (err) {
-      console.log("Endpoint failed:", url, err.message);
-    }
-  }
-  console.error("Could not fetch email content");
-  return null;
-}
-
-function toHtml(text) {
-  const escaped = text.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
-  return `<!DOCTYPE html><html><head><meta charset="utf-8"></head>
-<body style="margin:0;padding:32px;background:#fff;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;max-width:600px;">
-  <pre style="white-space:pre-wrap;font-family:inherit;font-size:14px;line-height:1.7;color:#222;">${escaped}</pre>
-  <div style="margin-top:32px;padding-top:16px;border-top:1px solid #eee;font-size:11px;color:#bbb;">MP · ${ASSISTANT_EMAIL}</div>
-</body></html>`;
-}
-
-function parseEmail(from = "") {
-  const m = from.match(/<(.+)>/) || from.match(/(\S+@\S+)/);
-  return m ? m[1] : from;
-}
-
-function stripHtml(html = "") {
-  return html.replace(/<[^>]*>/g, " ").replace(/\s+/g, " ").trim();
-}
-
-function cleanQuotedText(text = "") {
-  return text
-    .split("\n")
-    .filter(l => !l.startsWith(">"))
-    .join("\n")
-    .replace(/On .+wrote:\s*$/ms, "")
-    .replace(/[-_]{3,}[\s\S]*$/m, "")
-    .trim();
-}
-
-const PORT = process.env.PORT || 3000;
-app.listen(PORT, async () => {
-  console.log(`Listening on port ${PORT}`);
+async function getMemories() {
   try {
-    await redis.connect();
-    console.log("Redis connected ✓");
-  } catch (err) {
-    console.error("Redis connection failed:", err);
-  }
-});
-
-// Extract URLs from text
-function extractUrls(text) {
-  const urlRegex = /https?:\/\/[^\s<>"{}|\\^`\[\]]+/g;
-  const matches = text.match(urlRegex) || [];
-  // Skip google sheets/docs (already handled separately), limit to 3 URLs
-  return matches
-    .filter(url => !url.includes("docs.google.com") && !url.includes("sheets.google.com"))
-    .slice(0, 3);
+    const raw = await redis.get(MEMORY_KEY);
+    return raw ? JSON.parse(raw) : [];
+  } catch { return []; }
+}
+async function addMemory(item) {
+  const memories = await getMemories();
+  memories.push(item);
+  await redis.set(MEMORY_KEY, JSON.stringify(memories));
+}
+async function removeMemory(item) {
+  const memories = await getMemories();
+  const idx = memories.findIndex(m => m.toLowerCase().includes(item.toLowerCase()));
+  if (idx === -1) return false;
+  memories.splice(idx, 1);
+  await redis.set(MEMORY_KEY, JSON.stringify(memories));
+  return true;
 }
 
-// Fetch a URL and return its text content
+async function fetchAllSheetTabs(sheetId) {
+  try {
+    const metaRes = await fetch("https://sheets.googleapis.com/v4/spreadsheets/" + sheetId + "?key=" + GOOGLE_API_KEY);
+    if (!metaRes.ok) return null;
+    const meta = await metaRes.json();
+    const tabs = meta.sheets?.map(s => s.properties.title) || [];
+    console.log("Sheet tabs:", tabs);
+    const results = await Promise.all(tabs.map(async tab => {
+      const r = await fetch("https://sheets.googleapis.com/v4/spreadsheets/" + sheetId + "/values/" + encodeURIComponent(tab) + "?key=" + GOOGLE_API_KEY);
+      if (!r.ok) return null;
+      const d = await r.json();
+      const rows = d.values || [];
+      if (!rows.length) return null;
+      return "[" + tab + "]\n" + rows.map(row => row.join(" | ")).join("\n");
+    }));
+    return results.filter(Boolean).join("\n\n") || null;
+  } catch (err) { console.error("Sheet error:", err); return null; }
+}
+
 async function fetchUrl(url) {
   try {
     console.log("Fetching URL:", url);
@@ -342,81 +300,44 @@ async function fetchUrl(url) {
     });
     if (!response.ok) return null;
     const html = await response.text();
-    // Strip HTML tags and clean up whitespace
-    const text = html
+    return html
       .replace(/<script[^>]*>[\s\S]*?<\/script>/gi, "")
       .replace(/<style[^>]*>[\s\S]*?<\/style>/gi, "")
       .replace(/<[^>]+>/g, " ")
       .replace(/\s+/g, " ")
       .trim()
-      .slice(0, 3000); // Cap at 3000 chars per URL
-    return text;
-  } catch (err) {
-    console.log("URL fetch failed:", url, err.message);
-    return null;
-  }
+      .slice(0, 3000);
+  } catch (err) { console.log("URL fetch failed:", url, err.message); return null; }
 }
 
-// Fetch attachments from Resend and convert to base64
 async function fetchAttachments(emailId, attachmentMeta) {
   if (!attachmentMeta || attachmentMeta.length === 0) return [];
-  
   const results = [];
-  for (const att of attachmentMeta.slice(0, 5)) { // max 5 attachments
+  for (const att of attachmentMeta.slice(0, 5)) {
     try {
       console.log("Fetching attachment:", att.filename, att.content_type);
-      
-      // Fetch attachment from Resend attachments API
-      const url = `https://api.resend.com/emails/receiving/${emailId}/attachments/${att.id}`;
-      const response = await fetch(url, {
-        headers: { Authorization: `Bearer ${process.env.RESEND_API_KEY}` },
-      });
-      
-      if (!response.ok) {
-        const errText = await response.text();
-        console.log("Attachment fetch failed:", response.status, errText);
-        continue;
-      }
-      
+      const url = "https://api.resend.com/emails/receiving/" + emailId + "/attachments/" + att.id;
+      const response = await fetch(url, { headers: { Authorization: "Bearer " + process.env.RESEND_API_KEY } });
+      if (!response.ok) { console.log("Attachment fetch failed:", response.status); continue; }
       const data = await response.json();
-      console.log("Attachment API response keys:", Object.keys(data));
-
-      // Resend returns a download_url, not the content directly
-      if (!data.download_url) {
-        console.log("No download_url in attachment response");
-        continue;
-      }
-
+      if (!data.download_url) { console.log("No download_url"); continue; }
       const dlResponse = await fetch(data.download_url);
-      if (!dlResponse.ok) {
-        console.log("Attachment download failed:", dlResponse.status);
-        continue;
-      }
-
+      if (!dlResponse.ok) continue;
       const buffer = await dlResponse.arrayBuffer();
       const base64Data = Buffer.from(buffer).toString("base64");
-      console.log("Attachment downloaded, base64 length:", base64Data.length);
-      
+      console.log("Attachment downloaded, size:", base64Data.length);
       const ct = att.content_type || "";
-      
       if (ct === "application/pdf") {
         results.push({ type: "document", media_type: "application/pdf", data: base64Data });
       } else if (ct.includes("image/")) {
         const imgType = ct.includes("png") ? "image/png" : ct.includes("gif") ? "image/gif" : ct.includes("webp") ? "image/webp" : "image/jpeg";
         results.push({ type: "image", media_type: imgType, data: base64Data });
-      } else if (ct.includes("word") || ct.includes("document") || att.filename?.endsWith(".docx") || att.filename?.endsWith(".doc")) {
-        // Word docs — treat as document with PDF media type won't work, extract as text note
-        results.push({ type: "document", media_type: "application/pdf", data: base64Data });
       }
-    } catch (err) {
-      console.log("Attachment error:", err.message);
-    }
+    } catch (err) { console.log("Attachment error:", err.message); }
   }
-  
   return results;
 }
 
-// Fetch Ninajirachi shows from Seated API
 async function fetchSeatedShows() {
   try {
     console.log("Fetching Seated shows...");
@@ -424,56 +345,24 @@ async function fetchSeatedShows() {
       "https://cdn.seated.com/api/tour/22d23327-0a5a-4431-826d-3baa90fd57e0?include=tour-events",
       { headers: { "Accept": "application/vnd.api+json", "User-Agent": "Mozilla/5.0" } }
     );
-    console.log("Seated response status:", response.status);
-    if (!response.ok) return null;
+    if (!response.ok) { console.log("Seated failed:", response.status); return null; }
     const data = await response.json();
-    console.log("Seated data keys:", Object.keys(data));
-    console.log("Seated included count:", data.included?.length || 0);
-
     const events = data.included?.filter(i => i.type === "tour-events") || [];
-    if (!events.length) {
-      // Try alternate structure
-      const altEvents = data.data || [];
-      console.log("Alt events count:", altEvents.length);
-      if (altEvents.length) {
-        const lines = altEvents.map(e => {
-          const a = e.attributes || {};
-          return `${a.starts_at_date || a.date || ""} | ${a.venue_name || a.venue || ""} | ${a.city || ""}, ${a.country_code || a.country || ""} | ${a.ticket_status || ""}`;
-        });
-        return lines.join("\n");
-      }
-      return null;
-    }
-
-    // Log first event to check field names
-    if (events.length > 0) {
-      console.log("Sample Seated event attributes:", JSON.stringify(events[0].attributes, null, 2).slice(0, 500));
-    }
-
+    if (!events.length) return null;
     const lines = events.map(e => {
       const a = e.attributes || {};
-      const date = a.starts_at_date || a.starts_at || a.date || "";
-      const venue = a.venue_name || a.name || "";
-      const city = a.city || a.location || "";
-      const country = a.country_code || a.country || "";
-      const status = a.ticket_status || a.status || "";
-      return `${date} | ${venue} | ${city}, ${country} | ${status}`;
-    }).filter(line => line.replace(/\|/g, "").trim());
-
+      return (a.starts_at_date || "") + " | " + (a.venue_name || "") + " | " + (a.city || "") + ", " + (a.country_code || "") + " | " + (a.ticket_status || "");
+    }).filter(l => l.replace(/\|/g, "").trim());
     console.log("Seated shows found:", lines.length);
     return lines.join("\n");
-  } catch (err) {
-    console.error("Seated fetch error:", err);
-    return null;
-  }
+  } catch (err) { console.error("Seated error:", err); return null; }
 }
 
-// Spotify API
 async function getSpotifyToken() {
-  const creds = Buffer.from(`${process.env.SPOTIFY_CLIENT_ID}:${process.env.SPOTIFY_CLIENT_SECRET}`).toString("base64");
+  const creds = Buffer.from(process.env.SPOTIFY_CLIENT_ID + ":" + process.env.SPOTIFY_CLIENT_SECRET).toString("base64");
   const response = await fetch("https://accounts.spotify.com/api/token", {
     method: "POST",
-    headers: { "Authorization": `Basic ${creds}`, "Content-Type": "application/x-www-form-urlencoded" },
+    headers: { "Authorization": "Basic " + creds, "Content-Type": "application/x-www-form-urlencoded" },
     body: "grant_type=client_credentials",
   });
   const data = await response.json();
@@ -482,28 +371,34 @@ async function getSpotifyToken() {
 
 async function searchSpotifyTrack(query) {
   try {
+    console.log("Searching Spotify:", query);
     const token = await getSpotifyToken();
-    // Step 1: Search for the track
-    const searchUrl = `https://api.spotify.com/v1/search?q=${encodeURIComponent(query)}&type=track&limit=5`;
-    const searchRes = await fetch(searchUrl, { headers: { Authorization: `Bearer ${token}` } });
+    const searchRes = await fetch("https://api.spotify.com/v1/search?q=" + encodeURIComponent(query) + "&type=track&limit=5", {
+      headers: { Authorization: "Bearer " + token }
+    });
     const searchData = await searchRes.json();
     const tracks = searchData.tracks?.items || [];
     if (!tracks.length) return "No tracks found.";
-
-    // Step 2: Fetch full track objects by ID to get ISRC
     const ids = tracks.map(t => t.id).join(",");
-    const trackRes = await fetch(`https://api.spotify.com/v1/tracks?ids=${ids}`, { headers: { Authorization: `Bearer ${token}` } });
+    const trackRes = await fetch("https://api.spotify.com/v1/tracks?ids=" + ids, { headers: { Authorization: "Bearer " + token } });
     const trackData = await trackRes.json();
     const fullTracks = trackData.tracks || tracks;
-
     return fullTracks.map(t => {
       const mins = Math.floor(t.duration_ms / 60000);
       const secs = String(Math.floor((t.duration_ms % 60000) / 1000)).padStart(2, "0");
       const isrc = t.external_ids?.isrc || "N/A";
-      return `${t.name} — ${t.artists.map(a => a.name).join(", ")}\nISRC: ${isrc}\nLength: ${mins}:${secs}\nAlbum: ${t.album.name} (${t.album.release_date?.slice(0,4)})`;
+      return t.name + " - " + t.artists.map(a => a.name).join(", ") + "\nISRC: " + isrc + "\nLength: " + mins + ":" + secs + "\nAlbum: " + t.album.name + " (" + (t.album.release_date?.slice(0, 4) || "") + ")";
     }).join("\n\n");
-  } catch (err) {
-    console.error("Spotify error:", err);
-    return null;
-  }
+  } catch (err) { console.error("Spotify error:", err); return null; }
 }
+
+const PORT = process.env.PORT || 3000;
+app.listen(PORT, async () => {
+  console.log("Listening on port " + PORT);
+  try {
+    await redis.connect();
+    console.log("Redis connected");
+  } catch (err) {
+    console.error("Redis connection failed:", err);
+  }
+});
