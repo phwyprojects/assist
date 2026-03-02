@@ -41,7 +41,7 @@ You have access to tools you can call at any time:
 
 Use these tools proactively whenever they would help answer Matt's question. Do not say you cannot access external data — use your tools.
 
-When creating calendar events, extract the date, time, and details from context. If a timezone isn't specified, assume America/Los_Angeles (Pacific Time). If a time isn't specified, create an all-day event. Always confirm what you've added.`;
+When creating calendar events, extract the date, time, and details from context. If a time isn't specified, create an all-day event. Always confirm what you've added.`;
 
 const redis = createClient({ url: process.env.REDIS_URL });
 redis.on("error", (err) => console.error("Redis error:", err));
@@ -627,6 +627,21 @@ async function getGoogleCalendarToken() {
   return data.access_token;
 }
 
+async function getCalendarTimezone() {
+  try {
+    const token = await getGoogleCalendarToken();
+    const response = await fetch("https://www.googleapis.com/calendar/v3/calendars/primary", {
+      headers: { "Authorization": "Bearer " + token },
+    });
+    const data = await response.json();
+    console.log("Calendar timezone:", data.timeZone);
+    return data.timeZone || "America/Los_Angeles";
+  } catch (err) {
+    console.log("Timezone fetch failed:", err.message);
+    return "America/Los_Angeles";
+  }
+}
+
 async function createCalendarEvent(input) {
   try {
     console.log("Creating calendar event:", input.summary);
@@ -641,8 +656,9 @@ async function createCalendarEvent(input) {
       event.start = { date: input.start_date };
       event.end = { date: input.end_date };
     } else {
-      event.start = { dateTime: input.start_date, timeZone: "America/Los_Angeles" };
-      event.end = { dateTime: input.end_date, timeZone: "America/Los_Angeles" };
+      const tz = await getCalendarTimezone();
+      event.start = { dateTime: input.start_date, timeZone: tz };
+      event.end = { dateTime: input.end_date, timeZone: tz };
     }
 
     if (input.description) event.description = input.description;
@@ -730,11 +746,11 @@ async function updateCalendarEvent(input) {
 
     if (input.start_date) {
       if (input.all_day) existing.start = { date: input.start_date };
-      else existing.start = { dateTime: input.start_date, timeZone: "America/Los_Angeles" };
+      else { const tz = await getCalendarTimezone(); existing.start = { dateTime: input.start_date, timeZone: tz }; }
     }
     if (input.end_date) {
       if (input.all_day) existing.end = { date: input.end_date };
-      else existing.end = { dateTime: input.end_date, timeZone: "America/Los_Angeles" };
+      else { const tz = await getCalendarTimezone(); existing.end = { dateTime: input.end_date, timeZone: tz }; }
     }
 
     const response = await fetch("https://www.googleapis.com/calendar/v3/calendars/primary/events/" + input.event_id, {
