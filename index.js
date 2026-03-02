@@ -79,8 +79,11 @@ app.post("/inbound", async (req, res) => {
     const event = req.body;
     if (event.type !== "email.received") return;
 
-    const { email_id, from, subject, cc = [] } = event.data;
+    const { email_id, from, subject, cc = [], to = [] } = event.data;
     console.log("Received | From:", from, "| Subject:", subject);
+    console.log("CC field:", JSON.stringify(cc));
+    console.log("To field:", JSON.stringify(to));
+    console.log("Full event.data keys:", Object.keys(event.data));
 
     const emailContent = await fetchReceivedEmail(email_id);
     if (!emailContent) return;
