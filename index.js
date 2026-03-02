@@ -30,6 +30,7 @@ You have access to tools you can call at any time:
 - fetch_url: fetch any webpage or URL
 - search_spotify: search Spotify for track info including ISRC codes and track length
 - get_announced_shows: get Ninajirachi publicly announced shows from Seated
+- search_dropbox: search Matt's Dropbox for files by name or content (contracts, riders, press kits, etc.)
 
 Use these tools proactively whenever they would help answer Matt's question. Do not say you cannot access external data — use your tools.
 
@@ -67,6 +68,15 @@ const TOOLS = [
       type: "object",
       properties: {},
       required: []
+    }
+  },
+  {
+    name: "search_dropbox",
+    description: "Search files in Matt's Dropbox by name or content. Use when Matt asks about contracts, riders, documents, press kits, or any files that might be stored in Dropbox. Returns file names, paths, and modified dates.",
+    input_schema: {
+      type: "object",
+      properties: { query: { type: "string", description: "Search query e.g. Ninajirachi rider, press kit, contract" } },
+      required: ["query"]
     }
   }
 ];
@@ -227,6 +237,7 @@ app.post("/inbound", async (req, res) => {
             if (block.name === "fetch_url") result = await fetchUrl(block.input.url) || "Could not fetch URL.";
             else if (block.name === "search_spotify") result = await searchSpotifyTrack(block.input.query) || "No results found.";
             else if (block.name === "get_announced_shows") result = await fetchSeatedShows() || "No announced shows found.";
+            else if (block.name === "search_dropbox") result = await searchDropbox(block.input.query) || "No files found.";
           } catch (err) {
             result = "Error: " + err.message;
           }
@@ -451,6 +462,45 @@ async function searchSpotifyTrack(query) {
       return t.name + " - " + t.artists.map(a => a.name).join(", ") + "\nISRC: " + isrc + "\nLength: " + mins + ":" + secs + "\nAlbum: " + t.album.name + " (" + (t.album.release_date?.slice(0, 4) || "") + ")";
     }).join("\n\n");
   } catch (err) { console.error("Spotify error:", err); return null; }
+}
+
+async function getDropboxToken() {
+  const response = await fetch("https://api.dropboxapi.com/oauth2/token", {
+    method: "POST",
+    headers: { "Content-Type": "application/x-www-form-urlencoded" },
+    body: "grant_type=refresh_token&refresh_token=" + process.env.DROPBOX_REFRESH_TOKEN + "&client_id=" + process.env.DROPBOX_APP_KEY + "&client_secret=" + process.env.DROPBOX_APP_SECRET,
+  });
+  const data = await response.json();
+  if (data.error) console.log("Dropbox token error:", data.error);
+  return data.access_token;
+}
+
+async function searchDropbox(query) {
+  try {
+    console.log("Searching Dropbox:", query);
+    const token = await getDropboxToken();
+    const response = await fetch("https://api.dropboxapi.com/2/files/search_v2", {
+      method: "POST",
+      headers: {
+        "Authorization": "Bearer " + token,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ query, options: { max_results: 20 } }),
+    });
+    const data = await response.json();
+    if (data.error) { console.log("Dropbox search error:", JSON.stringify(data.error)); return null; }
+    const matches = data.matches || [];
+    if (!matches.length) return "No files found.";
+    console.log("Dropbox results:", matches.length);
+    return matches.map(m => {
+      const meta = m.metadata?.metadata || m.metadata || {};
+      const name = meta.name || "Unknown";
+      const path = meta.path_display || meta.path_lower || "";
+      const modified = meta.server_modified || meta.client_modified || "";
+      const size = meta.size ? Math.round(meta.size / 1024) + " KB" : "";
+      return name + "\n  Path: " + path + (modified ? "\n  Modified: " + modified : "") + (size ? "\n  Size: " + size : "");
+    }).join("\n\n");
+  } catch (err) { console.error("Dropbox error:", err); return null; }
 }
 
 const PORT = process.env.PORT || 3000;
