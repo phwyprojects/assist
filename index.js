@@ -87,10 +87,12 @@ app.post("/inbound", async (req, res) => {
 
     const emailContent = await fetchReceivedEmail(email_id);
     if (!emailContent) return;
-    console.log("Full email keys:", Object.keys(emailContent));
-    console.log("Email headers:", JSON.stringify(emailContent.headers || emailContent.header || "none"));
-    console.log("Email cc:", JSON.stringify(emailContent.cc));
-    console.log("Email to:", JSON.stringify(emailContent.to));
+    
+    // CC from webhook is often empty — use the full email object instead
+    const emailCc = emailContent.cc || cc || [];
+    console.log("Webhook CC:", JSON.stringify(cc));
+    console.log("Email object CC:", JSON.stringify(emailContent.cc));
+    console.log("Using CC:", JSON.stringify(emailCc));
 
     const body = emailContent.text || emailContent.plain_text || stripHtml(emailContent.html) || "";
     if (!body.trim()) return;
@@ -153,7 +155,7 @@ app.post("/inbound", async (req, res) => {
         userContent.push({ type: "image", source: { type: "base64", media_type: att.media_type, data: att.data } });
       }
     }
-    const ccEmails = cc.map(c => parseEmail(c)).filter(e => e && e.toLowerCase() !== senderEmail.toLowerCase() && e.toLowerCase() !== ASSISTANT_EMAIL.toLowerCase());
+    const ccEmails = emailCc.map(c => parseEmail(c)).filter(e => e && e.toLowerCase() !== senderEmail.toLowerCase() && e.toLowerCase() !== ASSISTANT_EMAIL.toLowerCase());
     const ccLine = ccEmails.length ? "\nCC: " + ccEmails.join(", ") + "\n" : "";
     userContent.push({ type: "text", text: "Subject: " + subject + ccLine + "\n" + cleanedBody });
 
