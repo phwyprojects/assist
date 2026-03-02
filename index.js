@@ -15,6 +15,9 @@ const ASSISTANT_EMAIL = process.env.ASSISTANT_EMAIL;
 const GOOGLE_API_KEY = process.env.GOOGLE_API_KEY;
 const SHEET_ID = process.env.SHEET_ID;
 const CONTEXT_SHEET_ID = process.env.CONTEXT_SHEET_ID;
+const GCAL_CLIENT_ID = process.env.GOOGLE_CALENDAR_CLIENT_ID;
+const GCAL_CLIENT_SECRET = process.env.GOOGLE_CALENDAR_CLIENT_SECRET;
+const GCAL_REFRESH_TOKEN = process.env.GOOGLE_CALENDAR_REFRESH_TOKEN;
 
 const BASE_SYSTEM_PROMPT = `You are MP, a smart and efficient assistant for Matt, an artist manager. Matt manages an artist named Ninajirachi.
 
@@ -31,10 +34,11 @@ You have access to tools you can call at any time:
 - search_spotify: search Spotify for track info including ISRC codes and track length
 - get_announced_shows: get Ninajirachi publicly announced shows from Seated
 - search_dropbox: search Matt's Dropbox for files by name or content (contracts, riders, press kits, etc.)
+- create_calendar_event: add an event to Matt's Google Calendar
 
 Use these tools proactively whenever they would help answer Matt's question. Do not say you cannot access external data — use your tools.
 
-Respond in plain text. If you are drafting an email, format it clearly. If there are tasks or schedule items, list them cleanly.`;
+When creating calendar events, extract the date, time, and details from context. If a timezone isn't specified, assume Australia/Sydney (AEST/AEDT). If a time isn't specified, create an all-day event. Always confirm what you've added.`;
 
 const redis = createClient({ url: process.env.REDIS_URL });
 redis.on("error", (err) => console.error("Redis error:", err));
@@ -77,6 +81,22 @@ const TOOLS = [
       type: "object",
       properties: { query: { type: "string", description: "Search query e.g. Ninajirachi rider, press kit, contract" } },
       required: ["query"]
+    }
+  },
+  {
+    name: "create_calendar_event",
+    description: "Add an event to Matt's Google Calendar. Use when Matt asks to schedule something, add something to his calendar, or when an email thread contains dates/events that should be calendared.",
+    input_schema: {
+      type: "object",
+      properties: {
+        summary: { type: "string", description: "Event title" },
+        start_date: { type: "string", description: "Start date/time in ISO format. For all-day events use YYYY-MM-DD. For timed events use YYYY-MM-DDTHH:MM:SS" },
+        end_date: { type: "string", description: "End date/time in ISO format. For all-day events use the next day YYYY-MM-DD. For timed events use YYYY-MM-DDTHH:MM:SS" },
+        description: { type: "string", description: "Event description or notes (optional)" },
+        location: { type: "string", description: "Event location (optional)" },
+        all_day: { type: "boolean", description: "Whether this is an all-day event (true) or has specific times (false)" }
+      },
+      required: ["summary", "start_date", "end_date", "all_day"]
     }
   }
 ];
@@ -238,6 +258,7 @@ app.post("/inbound", async (req, res) => {
             else if (block.name === "search_spotify") result = await searchSpotifyTrack(block.input.query) || "No results found.";
             else if (block.name === "get_announced_shows") result = await fetchSeatedShows() || "No announced shows found.";
             else if (block.name === "search_dropbox") result = await searchDropbox(block.input.query) || "No files found.";
+            else if (block.name === "create_calendar_event") result = await createCalendarEvent(block.input) || "Failed to create event.";
           } catch (err) {
             result = "Error: " + err.message;
           }
@@ -546,6 +567,61 @@ async function searchDropbox(query) {
     
     return results.join("\n\n");
   } catch (err) { console.error("Dropbox error:", err); return null; }
+}
+
+async function getGoogleCalendarToken() {
+  const response = await fetch("https://oauth2.googleapis.com/token", {
+    method: "POST",
+    headers: { "Content-Type": "application/x-www-form-urlencoded" },
+    body: "grant_type=refresh_token&refresh_token=" + GCAL_REFRESH_TOKEN + "&client_id=" + GCAL_CLIENT_ID + "&client_secret=" + GCAL_CLIENT_SECRET,
+  });
+  const data = await response.json();
+  if (data.error) console.log("Google Calendar token error:", data.error, data.error_description);
+  return data.access_token;
+}
+
+async function createCalendarEvent(input) {
+  try {
+    console.log("Creating calendar event:", input.summary);
+    const token = await getGoogleCalendarToken();
+    if (!token) return "Failed to authenticate with Google Calendar.";
+
+    const event = {
+      summary: input.summary,
+    };
+
+    if (input.all_day) {
+      event.start = { date: input.start_date };
+      event.end = { date: input.end_date };
+    } else {
+      event.start = { dateTime: input.start_date, timeZone: "Australia/Sydney" };
+      event.end = { dateTime: input.end_date, timeZone: "Australia/Sydney" };
+    }
+
+    if (input.description) event.description = input.description;
+    if (input.location) event.location = input.location;
+
+    const response = await fetch("https://www.googleapis.com/calendar/v3/calendars/primary/events", {
+      method: "POST",
+      headers: {
+        "Authorization": "Bearer " + token,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify(event),
+    });
+
+    const data = await response.json();
+    if (data.error) {
+      console.log("Calendar event error:", JSON.stringify(data.error));
+      return "Error creating event: " + (data.error.message || JSON.stringify(data.error));
+    }
+
+    console.log("Calendar event created:", data.id);
+    return "Event created: " + data.summary + " | " + (data.start.date || data.start.dateTime) + " | Link: " + data.htmlLink;
+  } catch (err) {
+    console.error("Calendar error:", err);
+    return "Error: " + err.message;
+  }
 }
 
 const PORT = process.env.PORT || 3000;
