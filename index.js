@@ -485,7 +485,7 @@ async function searchDropbox(query) {
         "Authorization": "Bearer " + token,
         "Content-Type": "application/json",
       },
-      body: JSON.stringify({ query, options: { max_results: 20 } }),
+      body: JSON.stringify({ query, options: { max_results: 5 } }),
     });
     const data = await response.json();
     if (data.error) { console.log("Dropbox search error:", JSON.stringify(data.error)); return null; }
@@ -500,9 +500,11 @@ async function searchDropbox(query) {
       const path = meta.path_display || meta.path_lower || "";
       const modified = meta.server_modified || meta.client_modified || "";
       const size = meta.size ? Math.round(meta.size / 1024) + " KB" : "";
+      const tag = meta[".tag"] || "unknown";
+      console.log("File:", name, "| tag:", tag, "| path:", path);
       
       let link = "";
-      if (path && meta[".tag"] === "file") {
+      if (path && tag !== "folder") {
         try {
           // Try to get existing shared link first
           const linkRes = await fetch("https://api.dropboxapi.com/2/sharing/list_shared_links", {
@@ -511,6 +513,7 @@ async function searchDropbox(query) {
             body: JSON.stringify({ path, direct_only: true }),
           });
           const linkData = await linkRes.json();
+          console.log("List links response for " + name + ":", JSON.stringify(linkData).slice(0, 200));
           if (linkData.links?.length) {
             link = linkData.links[0].url;
           } else {
@@ -518,9 +521,10 @@ async function searchDropbox(query) {
             const createRes = await fetch("https://api.dropboxapi.com/2/sharing/create_shared_link_with_settings", {
               method: "POST",
               headers: { "Authorization": "Bearer " + token, "Content-Type": "application/json" },
-              body: JSON.stringify({ path, settings: { requested_visibility: "public" } }),
+              body: JSON.stringify({ path }),
             });
             const createData = await createRes.json();
+            console.log("Create link response for " + name + ":", JSON.stringify(createData).slice(0, 200));
             link = createData.url || "";
           }
         } catch (err) { console.log("Sharing link error for " + path + ":", err.message); }
