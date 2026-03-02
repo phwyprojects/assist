@@ -382,10 +382,12 @@ async function searchSpotifyTrack(query) {
     // Fetch first track individually to get full object with external_ids
     const firstId = tracks[0].id;
     console.log("Fetching full track:", firstId);
-    const trackRes = await fetch("https://api.spotify.com/v1/tracks/" + firstId, { headers: { Authorization: "Bearer " + token } });
+    const trackRes = await fetch("https://api.spotify.com/v1/tracks/" + firstId + "?market=AU", { headers: { Authorization: "Bearer " + token } });
     console.log("Full track status:", trackRes.status);
     const fullTrack = await trackRes.json();
     console.log("Full track external_ids:", JSON.stringify(fullTrack.external_ids));
+    console.log("Full track name:", fullTrack.name, "| artists:", fullTrack.artists?.map(a => a.name));
+    console.log("Full track all keys:", Object.keys(fullTrack));
     // Use full track for first result, simplified for rest
     const fullTracks = [fullTrack, ...tracks.slice(1)];
     return fullTracks.map(t => {
