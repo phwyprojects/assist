@@ -103,6 +103,7 @@ app.post("/inbound", async (req, res) => {
 
     // Spotify track lookup
     const wantsSpotify = /isrc|spotify|track length/i.test(cleanedBody);
+    console.log("wantsSpotify:", wantsSpotify, "| body snippet:", cleanedBody.slice(0,200));
     const spotifyQueryMatch = cleanedBody.match(/for\s+(?:ninajirachi[^\w]{0,5})?([A-Za-z][^?.!\n]{2,50})/i);
     const spotifyQuery = spotifyQueryMatch ? spotifyQueryMatch[1].trim() : null;
 
