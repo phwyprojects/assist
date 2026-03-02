@@ -406,12 +406,17 @@ async function fetchSeatedShows() {
 
 async function getSpotifyToken() {
   const creds = Buffer.from(process.env.SPOTIFY_CLIENT_ID + ":" + process.env.SPOTIFY_CLIENT_SECRET).toString("base64");
+  const body = "grant_type=refresh_token&refresh_token=" + process.env.SPOTIFY_REFRESH_TOKEN;
+  console.log("Spotify auth: using refresh token, length:", process.env.SPOTIFY_REFRESH_TOKEN?.length);
   const response = await fetch("https://accounts.spotify.com/api/token", {
     method: "POST",
     headers: { "Authorization": "Basic " + creds, "Content-Type": "application/x-www-form-urlencoded" },
-    body: "grant_type=refresh_token&refresh_token=" + process.env.SPOTIFY_REFRESH_TOKEN,
+    body,
   });
   const data = await response.json();
+  console.log("Spotify token response keys:", Object.keys(data));
+  console.log("Spotify token scope:", data.scope);
+  if (data.error) console.log("Spotify token error:", data.error, data.error_description);
   return data.access_token;
 }
 
@@ -419,15 +424,27 @@ async function searchSpotifyTrack(query) {
   try {
     console.log("Searching Spotify:", query);
     const token = await getSpotifyToken();
-    // Including market in search returns external_ids (ISRC) in results
+    console.log("Token type check - first 10 chars:", token?.slice(0, 10));
     const searchRes = await fetch("https://api.spotify.com/v1/search?q=" + encodeURIComponent(query) + "&type=track&limit=5&market=US", {
       headers: { Authorization: "Bearer " + token }
     });
     const searchData = await searchRes.json();
     const tracks = searchData.tracks?.items || [];
     if (!tracks.length) return "No tracks found.";
-    console.log("First track external_ids:", JSON.stringify(tracks[0].external_ids));
-    return tracks.map(t => {
+    
+    // Fetch each track individually to get external_ids with user token
+    const fullTracks = await Promise.all(tracks.slice(0, 3).map(async t => {
+      try {
+        const res = await fetch("https://api.spotify.com/v1/tracks/" + t.id, {
+          headers: { Authorization: "Bearer " + token }
+        });
+        const full = await res.json();
+        console.log("Track " + t.id + " external_ids:", JSON.stringify(full.external_ids));
+        return full;
+      } catch { return t; }
+    }));
+    
+    return fullTracks.map(t => {
       const mins = Math.floor(t.duration_ms / 60000);
       const secs = String(Math.floor((t.duration_ms % 60000) / 1000)).padStart(2, "0");
       const isrc = t.external_ids?.isrc || "N/A";
