@@ -35,10 +35,13 @@ You have access to tools you can call at any time:
 - get_announced_shows: get Ninajirachi publicly announced shows from Seated
 - search_dropbox: search Matt's Dropbox for files by name or content (contracts, riders, press kits, etc.)
 - create_calendar_event: add an event to Matt's Google Calendar
+- list_calendar_events: search/list events on Matt's calendar
+- update_calendar_event: change an existing calendar event (find it first with list)
+- delete_calendar_event: remove a calendar event (find it first with list)
 
 Use these tools proactively whenever they would help answer Matt's question. Do not say you cannot access external data — use your tools.
 
-When creating calendar events, extract the date, time, and details from context. If a timezone isn't specified, assume Australia/Sydney (AEST/AEDT). If a time isn't specified, create an all-day event. Always confirm what you've added.`;
+When creating calendar events, extract the date, time, and details from context. If a timezone isn't specified, assume America/Los_Angeles (Pacific Time). If a time isn't specified, create an all-day event. Always confirm what you've added.`;
 
 const redis = createClient({ url: process.env.REDIS_URL });
 redis.on("error", (err) => console.error("Redis error:", err));
@@ -97,6 +100,47 @@ const TOOLS = [
         all_day: { type: "boolean", description: "Whether this is an all-day event (true) or has specific times (false)" }
       },
       required: ["summary", "start_date", "end_date", "all_day"]
+    }
+  },
+  {
+    name: "list_calendar_events",
+    description: "List upcoming events from Matt's Google Calendar. Use to find events before updating or deleting them, or when Matt asks what's on his calendar.",
+    input_schema: {
+      type: "object",
+      properties: {
+        time_min: { type: "string", description: "Start of time range in ISO format YYYY-MM-DDTHH:MM:SS. Defaults to now if not specified." },
+        time_max: { type: "string", description: "End of time range in ISO format YYYY-MM-DDTHH:MM:SS" },
+        query: { type: "string", description: "Free text search to filter events (optional)" }
+      },
+      required: []
+    }
+  },
+  {
+    name: "update_calendar_event",
+    description: "Update an existing event on Matt's Google Calendar. Use list_calendar_events first to find the event ID, then update it. Use when Matt asks to change the time, title, or details of an existing event.",
+    input_schema: {
+      type: "object",
+      properties: {
+        event_id: { type: "string", description: "The event ID from list_calendar_events" },
+        summary: { type: "string", description: "New event title (optional)" },
+        start_date: { type: "string", description: "New start date/time in ISO format (optional)" },
+        end_date: { type: "string", description: "New end date/time in ISO format (optional)" },
+        description: { type: "string", description: "New description (optional)" },
+        location: { type: "string", description: "New location (optional)" },
+        all_day: { type: "boolean", description: "Whether this is an all-day event" }
+      },
+      required: ["event_id"]
+    }
+  },
+  {
+    name: "delete_calendar_event",
+    description: "Delete an event from Matt's Google Calendar. Use list_calendar_events first to find the event ID. Use when Matt asks to remove or cancel a calendar event.",
+    input_schema: {
+      type: "object",
+      properties: {
+        event_id: { type: "string", description: "The event ID from list_calendar_events" }
+      },
+      required: ["event_id"]
     }
   }
 ];
@@ -259,6 +303,9 @@ app.post("/inbound", async (req, res) => {
             else if (block.name === "get_announced_shows") result = await fetchSeatedShows() || "No announced shows found.";
             else if (block.name === "search_dropbox") result = await searchDropbox(block.input.query) || "No files found.";
             else if (block.name === "create_calendar_event") result = await createCalendarEvent(block.input) || "Failed to create event.";
+            else if (block.name === "list_calendar_events") result = await listCalendarEvents(block.input) || "No events found.";
+            else if (block.name === "update_calendar_event") result = await updateCalendarEvent(block.input) || "Failed to update event.";
+            else if (block.name === "delete_calendar_event") result = await deleteCalendarEvent(block.input) || "Failed to delete event.";
           } catch (err) {
             result = "Error: " + err.message;
           }
@@ -594,8 +641,8 @@ async function createCalendarEvent(input) {
       event.start = { date: input.start_date };
       event.end = { date: input.end_date };
     } else {
-      event.start = { dateTime: input.start_date, timeZone: "Australia/Sydney" };
-      event.end = { dateTime: input.end_date, timeZone: "Australia/Sydney" };
+      event.start = { dateTime: input.start_date, timeZone: "America/Los_Angeles" };
+      event.end = { dateTime: input.end_date, timeZone: "America/Los_Angeles" };
     }
 
     if (input.description) event.description = input.description;
@@ -620,6 +667,118 @@ async function createCalendarEvent(input) {
     return "Event created: " + data.summary + " | " + (data.start.date || data.start.dateTime) + " | Link: " + data.htmlLink;
   } catch (err) {
     console.error("Calendar error:", err);
+    return "Error: " + err.message;
+  }
+}
+
+async function listCalendarEvents(input) {
+  try {
+    console.log("Listing calendar events:", JSON.stringify(input));
+    const token = await getGoogleCalendarToken();
+    if (!token) return "Failed to authenticate with Google Calendar.";
+
+    const params = new URLSearchParams({
+      maxResults: "10",
+      singleEvents: "true",
+      orderBy: "startTime",
+      timeMin: input.time_min ? new Date(input.time_min).toISOString() : new Date().toISOString(),
+    });
+    if (input.time_max) params.set("timeMax", new Date(input.time_max).toISOString());
+    if (input.query) params.set("q", input.query);
+
+    const response = await fetch("https://www.googleapis.com/calendar/v3/calendars/primary/events?" + params, {
+      headers: { "Authorization": "Bearer " + token },
+    });
+    const data = await response.json();
+    if (data.error) {
+      console.log("Calendar list error:", JSON.stringify(data.error));
+      return "Error: " + (data.error.message || JSON.stringify(data.error));
+    }
+
+    const events = data.items || [];
+    if (!events.length) return "No events found in that time range.";
+
+    console.log("Calendar events found:", events.length);
+    return events.map(e => {
+      const start = e.start.dateTime || e.start.date;
+      const end = e.end.dateTime || e.end.date;
+      return "ID: " + e.id + "\n  Title: " + e.summary + "\n  Start: " + start + "\n  End: " + end + (e.location ? "\n  Location: " + e.location : "") + (e.description ? "\n  Description: " + e.description : "");
+    }).join("\n\n");
+  } catch (err) {
+    console.error("Calendar list error:", err);
+    return "Error: " + err.message;
+  }
+}
+
+async function updateCalendarEvent(input) {
+  try {
+    console.log("Updating calendar event:", input.event_id);
+    const token = await getGoogleCalendarToken();
+    if (!token) return "Failed to authenticate with Google Calendar.";
+
+    // First get the existing event
+    const getRes = await fetch("https://www.googleapis.com/calendar/v3/calendars/primary/events/" + input.event_id, {
+      headers: { "Authorization": "Bearer " + token },
+    });
+    const existing = await getRes.json();
+    if (existing.error) return "Error finding event: " + existing.error.message;
+
+    // Merge updates
+    if (input.summary) existing.summary = input.summary;
+    if (input.description) existing.description = input.description;
+    if (input.location) existing.location = input.location;
+
+    if (input.start_date) {
+      if (input.all_day) existing.start = { date: input.start_date };
+      else existing.start = { dateTime: input.start_date, timeZone: "America/Los_Angeles" };
+    }
+    if (input.end_date) {
+      if (input.all_day) existing.end = { date: input.end_date };
+      else existing.end = { dateTime: input.end_date, timeZone: "America/Los_Angeles" };
+    }
+
+    const response = await fetch("https://www.googleapis.com/calendar/v3/calendars/primary/events/" + input.event_id, {
+      method: "PUT",
+      headers: {
+        "Authorization": "Bearer " + token,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify(existing),
+    });
+    const data = await response.json();
+    if (data.error) {
+      console.log("Calendar update error:", JSON.stringify(data.error));
+      return "Error updating event: " + (data.error.message || JSON.stringify(data.error));
+    }
+
+    console.log("Calendar event updated:", data.id);
+    return "Event updated: " + data.summary + " | " + (data.start.date || data.start.dateTime) + " | Link: " + data.htmlLink;
+  } catch (err) {
+    console.error("Calendar update error:", err);
+    return "Error: " + err.message;
+  }
+}
+
+async function deleteCalendarEvent(input) {
+  try {
+    console.log("Deleting calendar event:", input.event_id);
+    const token = await getGoogleCalendarToken();
+    if (!token) return "Failed to authenticate with Google Calendar.";
+
+    const response = await fetch("https://www.googleapis.com/calendar/v3/calendars/primary/events/" + input.event_id, {
+      method: "DELETE",
+      headers: { "Authorization": "Bearer " + token },
+    });
+
+    if (response.status === 204) {
+      console.log("Calendar event deleted:", input.event_id);
+      return "Event deleted successfully.";
+    }
+
+    const data = await response.json();
+    return "Error deleting event: " + (data.error?.message || JSON.stringify(data));
+  } catch (err) {
+    console.error("Calendar delete error:", err);
     return "Error: " + err.message;
   }
 }
