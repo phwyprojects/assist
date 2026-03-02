@@ -105,7 +105,13 @@ app.post("/inbound", async (req, res) => {
     const wantsSpotify = /isrc|spotify|track length/i.test(cleanedBody);
     console.log("wantsSpotify:", wantsSpotify, "| body snippet:", cleanedBody.slice(0,200));
     const spotifyQueryMatch = cleanedBody.match(/\btrack\s+([A-Za-z][^?.!\n,]{2,50})/i) || cleanedBody.match(/(?:isrc|length|duration)\s+(?:for|of)\s+(?:\S+\s+){0,3}([A-Za-z][^?.!\n,]{2,50})/i);
-    const spotifyQuery = wantsSpotify ? cleanedBody.replace(/mp\s*[-–]?\s*/i, '').replace(/please|can you|use spotify.*?(?:for|to get|get)|you can get it from spotify|from spotify|isrc|track length|grab it/gi, '').trim() : null;
+    // Extract track name - look for quoted text first, then words after "song/track"
+    const quotedTrack = cleanedBody.match(/["‘’“”]([^"'‘’“”
+]{2,60})["‘’“”]/);
+    const songWordTrack = cleanedBody.match(/(?:song|track)\s+([A-Z][^?.!\n,]{2,50})/i);
+    const spotifyQuery = wantsSpotify
+      ? (quotedTrack ? "Ninajirachi " + quotedTrack[1] : songWordTrack ? "Ninajirachi " + songWordTrack[1] : null)
+      : null;
     console.log("spotifyQuery:", spotifyQuery);
 
     const [memories, sheetData, contextData, seatedShows, spotifyData, attachments, ...urlContents] = await Promise.all([
