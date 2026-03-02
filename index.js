@@ -383,6 +383,7 @@ async function searchSpotifyTrack(query) {
     const trackRes = await fetch("https://api.spotify.com/v1/tracks?ids=" + ids, { headers: { Authorization: "Bearer " + token } });
     const trackData = await trackRes.json();
     const fullTracks = trackData.tracks || tracks;
+    if (fullTracks.length > 0) console.log("First track external_ids:", JSON.stringify(fullTracks[0].external_ids));
     return fullTracks.map(t => {
       const mins = Math.floor(t.duration_ms / 60000);
       const secs = String(Math.floor((t.duration_ms % 60000) / 1000)).padStart(2, "0");
