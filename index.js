@@ -87,6 +87,9 @@ app.post("/inbound", async (req, res) => {
 
     const emailContent = await fetchReceivedEmail(email_id);
     if (!emailContent) return;
+    console.log("emailContent keys:", Object.keys(emailContent));
+    console.log("emailContent.headers:", JSON.stringify(emailContent.headers)?.slice(0, 1000));
+    console.log("emailContent.raw (first 500):", typeof emailContent.raw === 'string' ? emailContent.raw.slice(0, 500) : JSON.stringify(emailContent.raw)?.slice(0, 500));
     
     // Gather recipients from multiple sources since Resend is inconsistent
     const emailTo = Array.isArray(emailContent.to) ? emailContent.to : (emailContent.to ? [emailContent.to] : []);
