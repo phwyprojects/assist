@@ -18,6 +18,8 @@ const CONTEXT_SHEET_ID = process.env.CONTEXT_SHEET_ID;
 
 const BASE_SYSTEM_PROMPT = `You are MP, a smart and efficient assistant for Matt, an artist manager. Matt manages an artist named Ninajirachi.
 
+You operate as an email assistant. When Matt emails you, your response is sent back as an email reply — including to anyone CC'd on the thread. You CAN and DO send real emails. Never say you can't send emails or can only respond in chat — that's incorrect. Your replies are delivered via email to Matt and any CC'd recipients automatically.
+
 Matt will email you directly to get things done — asking questions, forwarding emails from promoters or press, thinking through decisions, drafting communications, managing the tour schedule, keeping track of tasks.
 
 Tone: Sharp and direct. Matt is busy. Don't pad responses. Get to the point, then offer to go deeper if needed.
@@ -144,7 +146,9 @@ app.post("/inbound", async (req, res) => {
         userContent.push({ type: "image", source: { type: "base64", media_type: att.media_type, data: att.data } });
       }
     }
-    userContent.push({ type: "text", text: "Subject: " + subject + "\n\n" + cleanedBody });
+    const ccEmails = cc.map(c => parseEmail(c)).filter(e => e && e.toLowerCase() !== senderEmail.toLowerCase() && e.toLowerCase() !== ASSISTANT_EMAIL.toLowerCase());
+    const ccLine = ccEmails.length ? "\nCC: " + ccEmails.join(", ") + "\n" : "";
+    userContent.push({ type: "text", text: "Subject: " + subject + ccLine + "\n" + cleanedBody });
 
     const raw = await redis.get(THREAD_KEY);
     const history = raw ? JSON.parse(raw) : [];
@@ -194,7 +198,6 @@ app.post("/inbound", async (req, res) => {
     const trimmed = history.length > 40 ? history.slice(-40) : history;
     await redis.set(THREAD_KEY, JSON.stringify(trimmed));
 
-    const ccEmails = cc.map(c => parseEmail(c)).filter(e => e && e !== senderEmail);
     await sendReply(senderEmail, subject, reply, ccEmails.length ? ccEmails : null);
     console.log("Reply sent to:", senderEmail);
 
