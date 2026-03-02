@@ -492,14 +492,44 @@ async function searchDropbox(query) {
     const matches = data.matches || [];
     if (!matches.length) return "No files found.";
     console.log("Dropbox results:", matches.length);
-    return matches.map(m => {
+    
+    // Get sharing links for each file
+    const results = await Promise.all(matches.map(async m => {
       const meta = m.metadata?.metadata || m.metadata || {};
       const name = meta.name || "Unknown";
       const path = meta.path_display || meta.path_lower || "";
       const modified = meta.server_modified || meta.client_modified || "";
       const size = meta.size ? Math.round(meta.size / 1024) + " KB" : "";
-      return name + "\n  Path: " + path + (modified ? "\n  Modified: " + modified : "") + (size ? "\n  Size: " + size : "");
-    }).join("\n\n");
+      
+      let link = "";
+      if (path && meta[".tag"] === "file") {
+        try {
+          // Try to get existing shared link first
+          const linkRes = await fetch("https://api.dropboxapi.com/2/sharing/list_shared_links", {
+            method: "POST",
+            headers: { "Authorization": "Bearer " + token, "Content-Type": "application/json" },
+            body: JSON.stringify({ path, direct_only: true }),
+          });
+          const linkData = await linkRes.json();
+          if (linkData.links?.length) {
+            link = linkData.links[0].url;
+          } else {
+            // Create a new shared link
+            const createRes = await fetch("https://api.dropboxapi.com/2/sharing/create_shared_link_with_settings", {
+              method: "POST",
+              headers: { "Authorization": "Bearer " + token, "Content-Type": "application/json" },
+              body: JSON.stringify({ path, settings: { requested_visibility: "public" } }),
+            });
+            const createData = await createRes.json();
+            link = createData.url || "";
+          }
+        } catch (err) { console.log("Sharing link error for " + path + ":", err.message); }
+      }
+      
+      return name + "\n  Path: " + path + (modified ? "\n  Modified: " + modified : "") + (size ? "\n  Size: " + size : "") + (link ? "\n  Link: " + link : "");
+    }));
+    
+    return results.join("\n\n");
   } catch (err) { console.error("Dropbox error:", err); return null; }
 }
 
