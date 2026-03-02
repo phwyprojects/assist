@@ -106,6 +106,7 @@ app.post("/inbound", async (req, res) => {
     console.log("wantsSpotify:", wantsSpotify, "| body snippet:", cleanedBody.slice(0,200));
     const spotifyQueryMatch = cleanedBody.match(/\btrack\s+([A-Za-z][^?.!\n,]{2,50})/i) || cleanedBody.match(/(?:isrc|length|duration)\s+(?:for|of)\s+(?:\S+\s+){0,3}([A-Za-z][^?.!\n,]{2,50})/i);
     const spotifyQuery = wantsSpotify ? cleanedBody.replace(/mp\s*[-–]?\s*/i, '').replace(/please|can you|use spotify.*?(?:for|to get|get)|you can get it from spotify|from spotify|isrc|track length|grab it/gi, '').trim() : null;
+    console.log("spotifyQuery:", spotifyQuery);
 
     const [memories, sheetData, contextData, seatedShows, spotifyData, attachments, ...urlContents] = await Promise.all([
       getMemories(),
