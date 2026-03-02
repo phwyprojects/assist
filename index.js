@@ -379,17 +379,15 @@ async function searchSpotifyTrack(query) {
     const searchData = await searchRes.json();
     const tracks = searchData.tracks?.items || [];
     if (!tracks.length) return "No tracks found.";
-    const ids = tracks.map(t => t.id).join(",");
-    const trackRes = await fetch("https://api.spotify.com/v1/tracks?ids=" + ids, { headers: { Authorization: "Bearer " + token } });
-    const trackData = await trackRes.json();
-    console.log("trackData keys:", Object.keys(trackData));
-    console.log("trackData.tracks length:", trackData.tracks?.length);
-    if (trackData.tracks?.length > 0) {
-      console.log("First full track keys:", Object.keys(trackData.tracks[0]));
-      console.log("First track external_ids:", JSON.stringify(trackData.tracks[0].external_ids));
-      console.log("First track id:", trackData.tracks[0].id);
-    }
-    const fullTracks = trackData.tracks || tracks;
+    // Fetch first track individually to get full object with external_ids
+    const firstId = tracks[0].id;
+    console.log("Fetching full track:", firstId);
+    const trackRes = await fetch("https://api.spotify.com/v1/tracks/" + firstId, { headers: { Authorization: "Bearer " + token } });
+    console.log("Full track status:", trackRes.status);
+    const fullTrack = await trackRes.json();
+    console.log("Full track external_ids:", JSON.stringify(fullTrack.external_ids));
+    // Use full track for first result, simplified for rest
+    const fullTracks = [fullTrack, ...tracks.slice(1)];
     return fullTracks.map(t => {
       const mins = Math.floor(t.duration_ms / 60000);
       const secs = String(Math.floor((t.duration_ms % 60000) / 1000)).padStart(2, "0");
