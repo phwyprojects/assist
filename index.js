@@ -88,11 +88,14 @@ app.post("/inbound", async (req, res) => {
     const emailContent = await fetchReceivedEmail(email_id);
     if (!emailContent) return;
     
-    // CC from webhook is often empty — use the full email object instead
-    const emailCc = emailContent.cc || cc || [];
-    console.log("Webhook CC:", JSON.stringify(cc));
-    console.log("Email object CC:", JSON.stringify(emailContent.cc));
-    console.log("Using CC:", JSON.stringify(emailCc));
+    // Resend webhook CC is often empty. Gather all recipients from to + cc on the full email object.
+    // Gmail sometimes puts CC'd addresses in the "to" field.
+    const emailTo = Array.isArray(emailContent.to) ? emailContent.to : (emailContent.to ? [emailContent.to] : []);
+    const emailCc = Array.isArray(emailContent.cc) ? emailContent.cc : (emailContent.cc ? [emailContent.cc] : []);
+    const allRecipients = [...emailTo, ...emailCc];
+    console.log("Email to:", JSON.stringify(emailTo));
+    console.log("Email cc:", JSON.stringify(emailCc));
+    console.log("All recipients:", JSON.stringify(allRecipients));
 
     const body = emailContent.text || emailContent.plain_text || stripHtml(emailContent.html) || "";
     if (!body.trim()) return;
@@ -155,7 +158,8 @@ app.post("/inbound", async (req, res) => {
         userContent.push({ type: "image", source: { type: "base64", media_type: att.media_type, data: att.data } });
       }
     }
-    const ccEmails = emailCc.map(c => parseEmail(c)).filter(e => e && e.toLowerCase() !== senderEmail.toLowerCase() && e.toLowerCase() !== ASSISTANT_EMAIL.toLowerCase());
+    const ccEmails = allRecipients.map(c => parseEmail(c)).filter(e => e && e.toLowerCase() !== senderEmail.toLowerCase() && e.toLowerCase() !== ASSISTANT_EMAIL.toLowerCase());
+    console.log("CC emails to include:", JSON.stringify(ccEmails));
     const ccLine = ccEmails.length ? "\nCC: " + ccEmails.join(", ") + "\n" : "";
     userContent.push({ type: "text", text: "Subject: " + subject + ccLine + "\n" + cleanedBody });
 
