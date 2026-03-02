@@ -87,6 +87,10 @@ app.post("/inbound", async (req, res) => {
 
     const emailContent = await fetchReceivedEmail(email_id);
     if (!emailContent) return;
+    console.log("Full email keys:", Object.keys(emailContent));
+    console.log("Email headers:", JSON.stringify(emailContent.headers || emailContent.header || "none"));
+    console.log("Email cc:", JSON.stringify(emailContent.cc));
+    console.log("Email to:", JSON.stringify(emailContent.to));
 
     const body = emailContent.text || emailContent.plain_text || stripHtml(emailContent.html) || "";
     if (!body.trim()) return;
