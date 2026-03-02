@@ -127,7 +127,8 @@ app.post("/inbound", async (req, res) => {
     console.log("All unique emails:", JSON.stringify([...allEmails]));
 
     const body = emailContent.text || emailContent.plain_text || stripHtml(emailContent.html) || "";
-    if (!body.trim()) return;
+    console.log("Body length:", body.length);
+    if (!body.trim() && !subject.trim()) { console.log("Empty body and subject, returning"); return; }
 
     const senderEmail = parseEmail(from);
     const allowedEmails = (process.env.ALLOWED_EMAILS || YOUR_EMAIL).split(",").map(e => e.trim().toLowerCase());
@@ -137,7 +138,7 @@ app.post("/inbound", async (req, res) => {
     }
 
     const cleanedBody = cleanQuotedText(body);
-    if (!cleanedBody.trim()) return;
+    if (!cleanedBody.trim() && !subject.trim()) { console.log("Empty cleaned body and subject, returning"); return; }
     console.log("Cleaned body:", cleanedBody.slice(0, 200));
 
     // Memory commands
