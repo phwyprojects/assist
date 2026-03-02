@@ -409,7 +409,7 @@ async function getSpotifyToken() {
   const response = await fetch("https://accounts.spotify.com/api/token", {
     method: "POST",
     headers: { "Authorization": "Basic " + creds, "Content-Type": "application/x-www-form-urlencoded" },
-    body: "grant_type=client_credentials",
+    body: "grant_type=refresh_token&refresh_token=" + process.env.SPOTIFY_REFRESH_TOKEN,
   });
   const data = await response.json();
   return data.access_token;
