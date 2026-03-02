@@ -88,14 +88,40 @@ app.post("/inbound", async (req, res) => {
     const emailContent = await fetchReceivedEmail(email_id);
     if (!emailContent) return;
     
-    // Resend webhook CC is often empty. Gather all recipients from to + cc on the full email object.
-    // Gmail sometimes puts CC'd addresses in the "to" field.
+    // Gather recipients from multiple sources since Resend is inconsistent
     const emailTo = Array.isArray(emailContent.to) ? emailContent.to : (emailContent.to ? [emailContent.to] : []);
     const emailCc = Array.isArray(emailContent.cc) ? emailContent.cc : (emailContent.cc ? [emailContent.cc] : []);
-    const allRecipients = [...emailTo, ...emailCc];
+    
+    // Also parse raw headers for To: and Cc: as fallback
+    let headerRecipients = [];
+    const headers = emailContent.headers;
+    if (headers) {
+      const headerStr = typeof headers === 'string' ? headers : JSON.stringify(headers);
+      // Extract all email addresses from the headers string
+      const emailRegex = /[\w.-]+@[\w.-]+\.\w+/g;
+      const toMatch = headerStr.match(/"to"\s*:\s*"([^"]+)"/i) || headerStr.match(/(?:^|\n)To:\s*(.+)/mi);
+      const ccMatch = headerStr.match(/"cc"\s*:\s*"([^"]+)"/i) || headerStr.match(/(?:^|\n)Cc:\s*(.+)/mi);
+      if (toMatch) {
+        const toEmails = toMatch[1].match(emailRegex) || [];
+        headerRecipients.push(...toEmails);
+      }
+      if (ccMatch) {
+        const ccHeaderEmails = ccMatch[1].match(emailRegex) || [];
+        headerRecipients.push(...ccHeaderEmails);
+      }
+    }
+    
+    // Dedupe all recipients from all sources
+    const allEmails = new Set([
+      ...emailTo.map(e => parseEmail(e).toLowerCase()),
+      ...emailCc.map(e => parseEmail(e).toLowerCase()),
+      ...headerRecipients.map(e => e.toLowerCase()),
+    ]);
+    
     console.log("Email to:", JSON.stringify(emailTo));
     console.log("Email cc:", JSON.stringify(emailCc));
-    console.log("All recipients:", JSON.stringify(allRecipients));
+    console.log("Header recipients:", JSON.stringify(headerRecipients));
+    console.log("All unique emails:", JSON.stringify([...allEmails]));
 
     const body = emailContent.text || emailContent.plain_text || stripHtml(emailContent.html) || "";
     if (!body.trim()) return;
@@ -158,7 +184,7 @@ app.post("/inbound", async (req, res) => {
         userContent.push({ type: "image", source: { type: "base64", media_type: att.media_type, data: att.data } });
       }
     }
-    const ccEmails = allRecipients.map(c => parseEmail(c)).filter(e => e && e.toLowerCase() !== senderEmail.toLowerCase() && e.toLowerCase() !== ASSISTANT_EMAIL.toLowerCase());
+    const ccEmails = [...allEmails].filter(e => e && e !== senderEmail.toLowerCase() && e !== ASSISTANT_EMAIL.toLowerCase());
     console.log("CC emails to include:", JSON.stringify(ccEmails));
     const ccLine = ccEmails.length ? "\nCC: " + ccEmails.join(", ") + "\n" : "";
     userContent.push({ type: "text", text: "Subject: " + subject + ccLine + "\n" + cleanedBody });
