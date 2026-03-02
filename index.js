@@ -290,6 +290,17 @@ function toHtml(text) {
 }
 
 function cleanQuotedText(text) {
+  // Check if this is a forwarded email — preserve the full thread so MP has complete context
+  const isForward = /[-]{3,}\s*Forwarded message\s*[-]{3,}/i.test(text)
+    || /^Begin forwarded message:/im.test(text)
+    || /^From:\s+.+\n(Sent|Date):\s+.+\nTo:\s+.+/im.test(text);
+  
+  if (isForward) {
+    // Keep everything — MP needs to read the full thread including her own replies
+    return text.trim();
+  }
+  
+  // For regular back-and-forth replies, strip quoted text to avoid echoing
   return text
     .replace(/^(On .+?wrote:)\s*/ms, "")
     .replace(/^>.*$/gm, "")
