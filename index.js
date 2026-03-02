@@ -87,43 +87,43 @@ app.post("/inbound", async (req, res) => {
 
     const emailContent = await fetchReceivedEmail(email_id);
     if (!emailContent) return;
-    console.log("emailContent keys:", Object.keys(emailContent));
-    console.log("emailContent.headers:", JSON.stringify(emailContent.headers)?.slice(0, 1000));
-    console.log("emailContent.raw (first 500):", typeof emailContent.raw === 'string' ? emailContent.raw.slice(0, 500) : JSON.stringify(emailContent.raw)?.slice(0, 500));
     
-    // Gather recipients from multiple sources since Resend is inconsistent
+    // Download the raw email to get full To/Cc headers (Resend strips extra recipients from API response)
+    let rawEmail = '';
+    if (emailContent.raw?.download_url) {
+      try {
+        const rawRes = await fetch(emailContent.raw.download_url);
+        if (rawRes.ok) rawEmail = await rawRes.text();
+        console.log("Raw email (first 1000):", rawEmail.slice(0, 1000));
+      } catch (err) { console.log("Raw email download failed:", err.message); }
+    }
+    
+    // Parse To: and Cc: from raw email headers
+    let rawRecipients = [];
+    if (rawEmail) {
+      // Get just the headers (before the first blank line)
+      const headerSection = rawEmail.split(/\r?\n\r?\n/)[0] || '';
+      // Unfold headers (continued lines start with whitespace)
+      const unfolded = headerSection.replace(/\r?\n[ \t]+/g, ' ');
+      const toMatch = unfolded.match(/^To:\s*(.+)$/mi);
+      const ccMatch = unfolded.match(/^Cc:\s*(.+)$/mi);
+      const emailRegex = /[\w.-]+@[\w.-]+\.\w+/g;
+      if (toMatch) rawRecipients.push(...(toMatch[1].match(emailRegex) || []));
+      if (ccMatch) rawRecipients.push(...(ccMatch[1].match(emailRegex) || []));
+    }
+    
+    // Also grab from Resend API fields as backup
     const emailTo = Array.isArray(emailContent.to) ? emailContent.to : (emailContent.to ? [emailContent.to] : []);
     const emailCc = Array.isArray(emailContent.cc) ? emailContent.cc : (emailContent.cc ? [emailContent.cc] : []);
-    
-    // Also parse raw headers for To: and Cc: as fallback
-    let headerRecipients = [];
-    const headers = emailContent.headers;
-    if (headers) {
-      const headerStr = typeof headers === 'string' ? headers : JSON.stringify(headers);
-      // Extract all email addresses from the headers string
-      const emailRegex = /[\w.-]+@[\w.-]+\.\w+/g;
-      const toMatch = headerStr.match(/"to"\s*:\s*"([^"]+)"/i) || headerStr.match(/(?:^|\n)To:\s*(.+)/mi);
-      const ccMatch = headerStr.match(/"cc"\s*:\s*"([^"]+)"/i) || headerStr.match(/(?:^|\n)Cc:\s*(.+)/mi);
-      if (toMatch) {
-        const toEmails = toMatch[1].match(emailRegex) || [];
-        headerRecipients.push(...toEmails);
-      }
-      if (ccMatch) {
-        const ccHeaderEmails = ccMatch[1].match(emailRegex) || [];
-        headerRecipients.push(...ccHeaderEmails);
-      }
-    }
     
     // Dedupe all recipients from all sources
     const allEmails = new Set([
       ...emailTo.map(e => parseEmail(e).toLowerCase()),
       ...emailCc.map(e => parseEmail(e).toLowerCase()),
-      ...headerRecipients.map(e => e.toLowerCase()),
+      ...rawRecipients.map(e => e.toLowerCase()),
     ]);
     
-    console.log("Email to:", JSON.stringify(emailTo));
-    console.log("Email cc:", JSON.stringify(emailCc));
-    console.log("Header recipients:", JSON.stringify(headerRecipients));
+    console.log("Raw recipients:", JSON.stringify(rawRecipients));
     console.log("All unique emails:", JSON.stringify([...allEmails]));
 
     const body = emailContent.text || emailContent.plain_text || stripHtml(emailContent.html) || "";
