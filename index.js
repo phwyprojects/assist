@@ -476,12 +476,20 @@ async function getSpotifyToken() {
 async function searchSpotifyTrack(query) {
   try {
     const token = await getSpotifyToken();
-    const url = `https://api.spotify.com/v1/search?q=${encodeURIComponent(query)}&type=track&limit=5`;
-    const response = await fetch(url, { headers: { Authorization: `Bearer ${token}` } });
-    const data = await response.json();
-    const tracks = data.tracks?.items || [];
+    // Step 1: Search for the track
+    const searchUrl = `https://api.spotify.com/v1/search?q=${encodeURIComponent(query)}&type=track&limit=5`;
+    const searchRes = await fetch(searchUrl, { headers: { Authorization: `Bearer ${token}` } });
+    const searchData = await searchRes.json();
+    const tracks = searchData.tracks?.items || [];
     if (!tracks.length) return "No tracks found.";
-    return tracks.map(t => {
+
+    // Step 2: Fetch full track objects by ID to get ISRC
+    const ids = tracks.map(t => t.id).join(",");
+    const trackRes = await fetch(`https://api.spotify.com/v1/tracks?ids=${ids}`, { headers: { Authorization: `Bearer ${token}` } });
+    const trackData = await trackRes.json();
+    const fullTracks = trackData.tracks || tracks;
+
+    return fullTracks.map(t => {
       const mins = Math.floor(t.duration_ms / 60000);
       const secs = String(Math.floor((t.duration_ms % 60000) / 1000)).padStart(2, "0");
       const isrc = t.external_ids?.isrc || "N/A";
