@@ -732,34 +732,30 @@ async function updateCalendarEvent(input) {
     const token = await getGoogleCalendarToken();
     if (!token) return "Failed to authenticate with Google Calendar.";
 
-    // First get the existing event
-    const getRes = await fetch("https://www.googleapis.com/calendar/v3/calendars/primary/events/" + input.event_id, {
-      headers: { "Authorization": "Bearer " + token },
-    });
-    const existing = await getRes.json();
-    if (existing.error) return "Error finding event: " + existing.error.message;
-
-    // Merge updates
-    if (input.summary) existing.summary = input.summary;
-    if (input.description) existing.description = input.description;
-    if (input.location) existing.location = input.location;
+    // Build only the fields to update
+    const patch = {};
+    if (input.summary) patch.summary = input.summary;
+    if (input.description) patch.description = input.description;
+    if (input.location) patch.location = input.location;
 
     if (input.start_date) {
-      if (input.all_day) existing.start = { date: input.start_date };
-      else { const tz = await getCalendarTimezone(); existing.start = { dateTime: input.start_date, timeZone: tz }; }
+      if (input.all_day) patch.start = { date: input.start_date };
+      else { const tz = await getCalendarTimezone(); patch.start = { dateTime: input.start_date, timeZone: tz }; }
     }
     if (input.end_date) {
-      if (input.all_day) existing.end = { date: input.end_date };
-      else { const tz = await getCalendarTimezone(); existing.end = { dateTime: input.end_date, timeZone: tz }; }
+      if (input.all_day) patch.end = { date: input.end_date };
+      else { const tz = await getCalendarTimezone(); patch.end = { dateTime: input.end_date, timeZone: tz }; }
     }
 
+    console.log("Patch payload:", JSON.stringify(patch));
+
     const response = await fetch("https://www.googleapis.com/calendar/v3/calendars/primary/events/" + input.event_id, {
-      method: "PUT",
+      method: "PATCH",
       headers: {
         "Authorization": "Bearer " + token,
         "Content-Type": "application/json",
       },
-      body: JSON.stringify(existing),
+      body: JSON.stringify(patch),
     });
     const data = await response.json();
     if (data.error) {
