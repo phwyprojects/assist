@@ -274,11 +274,15 @@ app.post("/inbound", async (req, res) => {
     // Agentic loop
     let reply = null;
     let currentMessages = [...history];
+    let iterations = 0;
+    const MAX_ITERATIONS = 10;
 
-    while (!reply) {
+    while (!reply && iterations < MAX_ITERATIONS) {
+      iterations++;
+      console.log("Agentic loop iteration:", iterations);
       const response = await anthropic.messages.create({
         model: "claude-sonnet-4-20250514",
-        max_tokens: 1500,
+        max_tokens: 4000,
         system: systemPrompt,
         tools: TOOLS,
         messages: currentMessages,
@@ -314,6 +318,11 @@ app.post("/inbound", async (req, res) => {
         }
         currentMessages.push({ role: "user", content: toolResults });
       }
+    }
+
+    if (!reply) {
+      console.log("Agentic loop hit max iterations");
+      reply = "Sorry, I ran into an issue processing that request. Can you try again?";
     }
 
     history.push({ role: "assistant", content: reply });
