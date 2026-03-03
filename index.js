@@ -41,7 +41,7 @@ You have access to tools you can call at any time:
 
 Use these tools proactively whenever they would help answer Matt's question. Do not say you cannot access external data — use your tools.
 
-When creating calendar events, extract the date, time, and details from context. If a time isn't specified, create an all-day event. Always confirm what you've added.`;
+When creating calendar events, extract the date, time, and details from context. If a time isn't specified, create an all-day event. Always confirm what you've added. When updating or deleting events, ALWAYS call list_calendar_events first to get the current event ID — never reuse event IDs from earlier in the conversation.`;
 
 const redis = createClient({ url: process.env.REDIS_URL });
 redis.on("error", (err) => console.error("Redis error:", err));
@@ -731,6 +731,17 @@ async function updateCalendarEvent(input) {
     console.log("Updating calendar event:", input.event_id);
     const token = await getGoogleCalendarToken();
     if (!token) return "Failed to authenticate with Google Calendar.";
+
+    // First verify the event exists
+    const getRes = await fetch("https://www.googleapis.com/calendar/v3/calendars/primary/events/" + input.event_id, {
+      headers: { "Authorization": "Bearer " + token },
+    });
+    if (!getRes.ok) {
+      console.log("Event lookup failed:", getRes.status);
+      // Try listing events to help MP find the right one
+      const listRes = await listCalendarEvents({ query: input.summary || "", time_min: new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString() });
+      return "Event ID not found (404). The event may have been deleted or created on a different calendar. Here are recent events to find the right ID:\n\n" + listRes;
+    }
 
     // Build only the fields to update
     const patch = {};
